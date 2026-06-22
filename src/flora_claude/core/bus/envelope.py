@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+from pydantic import Field, BaseModel
+
+
+class JsonRpcRequest(BaseModel):
+    jsonrpc: Literal["2.0"] = "2.0"
+    method: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    id: str
+
+class JsonRpcSuccess(BaseModel):
+    jsonrpc: Literal["2.0"] = "2.0"
+    result: Any     # 结果可以是任何类型的对象
+    id: str
+
+class JsonRpcErrorObject(BaseModel):
+    code: int
+    message: str
+    data: Any = None
+
+class JsonRpcError(BaseModel):
+    jsonrpc: Literal["2.0"] = "2.0"
+    error: JsonRpcErrorObject
+    id: str | None = None
+
+
+PARSE_ERROR = -32700      # 解析错误
+INVALID_REQUEST = -32600  # 请求格式错误
+METHOD_NOT_FOUND = -32601 # 方法不存在
+INVALID_PARAMS = -32602   # 参数错误
+INTERNAL_ERROR = -32603   # 服务器内部错误
+
+def make_error(id: str | None, code:int, message: str, data: Any = None) -> JsonRpcError:
+    return JsonRpcError(
+        id=id,
+        error=JsonRpcErrorObject(code=code, message=message,data=data)
+    )
