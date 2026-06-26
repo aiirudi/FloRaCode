@@ -13,12 +13,37 @@ from flora_claude.core.bus.envelope import (
     make_error,
 )
 
-from flora_claude.core.bus.events import Event, CoreStartedEvent
+from flora_claude.core.bus.events import (
+    Event, 
+    CoreStartedEvent,
+    LlmModelSelectedEvent,
+    LlmTokenEvent,
+    LlmUsageEvent,
+    LogLineEvent,
+    RunStartedEvent,
+    RunFinishedEvent,
+    StepStartedEvent,
+    StepFinishedEvent,
+    ToolCallStartedEvent,
+    ToolCallFinishedEvent,
+    ToolCallFailedEvent
+)
 
 __all__ = [
     "Command",
     "CoreStartedEvent",
     "Event",
+    "LlmModelSelectedEvent",
+    "LlmTokenEvent",
+    "LlmUsageEvent",
+    "LogLineEvent",
+    "RunStartedEvent",
+    "RunFinishedEvent",
+    "StepStartedEvent",
+    "StepFinishedEvent",
+    "ToolCallStartedEvent",
+    "ToolCallFinishedEvent",
+    "ToolCallFailedEvent",
     "INTERNAL_ERROR",
     "INVALID_PARAMS",
     "INVALID_REQUEST",
