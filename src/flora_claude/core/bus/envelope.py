@@ -10,6 +10,10 @@ class JsonRpcRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     id: str
 
+class EventPushEnvelope(BaseModel):
+    kind: Literal["event"] = "event"
+    event: dict[str, Any] #Event.model_dump() 的序列化结果
+
 class JsonRpcSuccess(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
     result: Any     # 结果可以是任何类型的对象
@@ -24,7 +28,6 @@ class JsonRpcError(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
     error: JsonRpcErrorObject
     id: str | None = None
-
 
 PARSE_ERROR = -32700      # 解析错误
 INVALID_REQUEST = -32600  # 请求格式错误

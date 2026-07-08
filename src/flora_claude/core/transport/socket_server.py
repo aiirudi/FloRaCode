@@ -4,9 +4,13 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from pydantic import  BaseModel, ValidationError
+
+
+from flora_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 
 from flora_claude.core.bus.envelope import (
     INTERNAL_ERROR,
@@ -21,16 +25,22 @@ from flora_claude.core.bus.envelope import (
 logger = logging.getLogger(__name__)
 
 type CommandHandler = Callable[[dict[str, Any]], Awaitable[Any]]
+# 每个连接处理协程中，当前正在处理的 writer（供 handler 读取连接上下文）
+_writer_var: ContextVar[asyncio.StreamWriter] = ContextVar("_writer_var")
 
+# 返回当前 handler 调用所属连接的 StreamWriter
+def get_connection_writer() -> asyncio.StreamWriter:
+    return _writer_var.get()
 
 _MAX_LINE_BYTES = 1 * 1024 * 1024
 
 class SocketServer:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, broadcaster: IpcEventBroadcaster | None = None) -> None:
         self._host = host
         self._port = port
         self._handlers: dict[str, CommandHandler] = {}
         self._server: asyncio.AbstractServer | None = None
+        self._broadcaster = broadcaster
     
     def register(self, method: str, handler: CommandHandler) -> None:
         self._handlers[method] = handler
@@ -48,8 +58,8 @@ class SocketServer:
 
         self._server = await asyncio.start_server(
             self._handle_connection,
-            self._host,
-            self._port,
+            host=self._host,
+            port=self._port,
             limit=_MAX_LINE_BYTES
         )
         return f"{self._host}:{self._port}"
@@ -71,6 +81,9 @@ class SocketServer:
         try:
             await self._read_loop(reader, writer)
         finally:
+            # 断开连接前先client广播事件
+            if self._broadcaster is not None:
+                self._broadcaster.unsubscribe(writer)
             # 断开连接
             writer.close()
             try:
@@ -117,6 +130,7 @@ class SocketServer:
             )
             return
         
+        _writer_var.set(writer)
         try:
             result = await handler(req.params)
         except ValidationError as e:

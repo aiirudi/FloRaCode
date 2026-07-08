@@ -4,11 +4,12 @@ import asyncio
 import json
 import sys
 import time
+from typing import Any
 
 from pydantic import BaseModel
 
 from flora_claude.core.config import FloRaConfig
-from flora_claude.core.runner import AgentRunner
+from flora_claude.core.transport.socket_client import IpcError, SocketClient
 
 from flora_claude.core.bus.events import (
     RunStartedEvent,
@@ -35,47 +36,103 @@ class StdoutPrinter:
             print()
             self._inline = False
         
-    async def handle(self, event: BaseModel) -> None:
-        if isinstance(event, RunStartedEvent):
-            self._run_start = time.monotonic()
-            print(f"[run] {event.run_id}")
+    async def handle(self, event: dict[str, Any]) -> None:
+        type = event.get("type", "")
         
-        elif isinstance(event, StepStartedEvent):
+        if type == "run.started":
+            self._run_start = time.monotonic()
+            print(f"[run] {event.get("run_id", "")}")
+        
+        elif type == "step.started":
             self._ensure_newline()
-            print(f"[step {event.step}] planning ...")
+            print(f"[step {event.get("step")}] planning ...")
 
-        elif isinstance(event, LlmTokenEvent):
-            print(event.token, end="", flush=True)
+        elif type == "llm.token":
+            print(event.get("token", ""), end="", flush=True)
             self._inline = True
         
-        elif isinstance(event, ToolCallStartedEvent):
+        elif type == "tool.call_started":
             self._ensure_newline()
-            params_str = json.dumps(event.params, ensure_ascii=False)
-            print(f"[tool] {event.tool_name} {params_str}")
+            params_str = json.dumps(event.get("params"), ensure_ascii=False)
+            print(f"[tool] {event.get("tool_name", "")} {params_str}")
         
-        elif isinstance(event, ToolCallFinishedEvent):
-            print(f"[tool] {event.tool_name} ✓  {event.elapsed_ms}ms")
+        elif type == "tool.call_finished":
+            print(f"[tool] {event.get("tool_name", "")} ✓  {event.get("elapsed_ms")}ms")
     
-        elif isinstance(event, ToolCallFailedEvent):
+        elif type == "tool.call_failed":
             print(
-                f"[tool] {event.tool_name}✗  {event.error_message}",
+                f"[tool] {event.get("tool_name", "")}✗  {event.get("error_message", "")}",
                 file=sys.stderr
             )
         
-        elif isinstance(event, StepFinishedEvent):
+        elif type == "step.finished":
             self._ensure_newline()
-            print(f"[step {event.step}] done")
+            print(f"[step {event.get("step")}] done")
         
-        elif isinstance(event, RunFinishedEvent):
+        elif type == "run.finished":
             self._ensure_newline()
             elapsed = time.monotonic() - self._run_start            
-            print(f"[run] {event.status}  {event.steps} steps  {elapsed:.1f}s")
+            print(f"[run] {event.get("status", "")}  {event.get("steps", "")} steps  {elapsed:.1f}s")
+
+# 异步核心：连接 daemon, 订阅事件，触发run，等待 run.finished
+async def _run_async(goal: str, config: FloRaConfig) -> int:
+    client = SocketClient(config.host, config.port)
+    try:
+        await client.connect()
+    except (ConnectionRefusedError, OSError):
+        print(f"error: core not running ({config.host}:{config.port})", file=sys.stderr)
+        return 1
+
+    printer = StdoutPrinter()
+    finished = asyncio.Event()
+    exit_code = 0
+
+    async def on_event(event: dict[str, Any]) -> None:
+        nonlocal exit_code
+        await printer.handle(event)
+        if event.get("type") == "run.finished":
+            if event.get("status") != "success":
+                exit_code = 1
+            finished.set()
+    
+    client.on_event(on_event)
+    loop_task = asyncio.create_task(client.run_event_loop())
+
+    try:
+        await client.send_command(
+            "event.subscribe",
+            {
+                "topics": ["run.*", "step.*", "tool.*", "llm.token", "llm.usage"],
+                "scope": "global",
+            }
+        )
+        await client.send_command(
+            "agent.run",
+            {
+                "goal": goal
+            }
+        )
+    except IpcError as e:
+        print(f"error: {e}", file=sys.stderr)
+        loop_task.cancel()
+        await client.close()
+        return 1
+    
+    await finished.wait()
+
+    loop_task.cancel()
+    try:
+        await loop_task
+    except asyncio.CancelledError:
+        pass
+
+    await client.close()
+    return exit_code
 
 
 def cmd_run(goal: str, config: FloRaConfig) -> None:
-    printer = StdoutPrinter()
-    runner = AgentRunner(config, extra_handlers=[printer.handle])
     try:
-        asyncio.run(runner.run(goal))
+        exit_code = asyncio.run(_run_async(goal, config))
     except KeyboardInterrupt:
         sys.exit(130)
+    sys.exit(exit_code)
