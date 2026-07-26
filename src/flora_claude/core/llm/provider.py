@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from datetime import UTC, datetime
 from typing import Any
@@ -36,6 +38,9 @@ class AnthropicProvider:
         tool_schemas: list[dict[str, object]],
         bus: EventBus,
         run_id: str,
+        *,
+        step: int = 0,
+
     ) -> LlmResponse:
         await  bus.publish(LlmModelSelectedEvent(run_id=run_id, model=self._model, strategy="static", ts=_now()))
 

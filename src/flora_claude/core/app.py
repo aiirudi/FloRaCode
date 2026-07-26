@@ -10,6 +10,9 @@ import asyncio
 import signal
 
 from typing import Any
+from pathlib import Path
+
+from pydantic import BaseModel
 
 import flora_claude
 from flora_claude.core.bus.commands import (
@@ -25,20 +28,28 @@ from flora_claude.core.logging_setup import setup_logging
 from flora_claude.core.runs import events_file, new_run_id
 from flora_claude.core.runner import AgentRunner
 from flora_claude.core.transport.socket_server import SocketServer, get_connection_writer
+from flora_claude.core.trace.record import TraceRecord
+from flora_claude.core.trace.writer import TraceWriter
 from flora_claude.core.events.bus import EventBus
 from flora_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 from flora_claude.core.config import FloRaConfig,get_config
 
 logger = logging.getLogger(__name__)
 
+
+def _now():
+    return datetime.datetime.now(datetime.UTC).isoformat()
+
 class CoreApp:
     def __init__(self):
         self._start_time = time.monotonic()
         self._bus = EventBus()
-        self._broadcaster = IpcEventBroadcaster()
-        self._bus.subscribe(self._broadcaster.handle)
-        self._current_run_task: asyncio.Task[None] | None = None #asyncio.Task[None] 中的 None 表示任务的返回类型
+        self._broadcaster: IpcEventBroadcaster | None = None
         self._config: FloRaConfig | None = None
+        self._trace: TraceWriter | None = None
+        self._running_runs: set[asyncio.Task[None]] = set()
+
+        
     
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
         client = params.get("client", "unknown")
@@ -48,21 +59,35 @@ class CoreApp:
             uptime_ms=int((time.monotonic() - self._start_time) * 1000),
             received_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
+
+    # 将 EventBus 事件写入 trace （作为 EventBbus 订阅者）
+    async def _trace_event_handler(self, event: BaseModel) -> None:
+        assert self._trace is not None
+        event_dict = event.model_dump()
+        self._trace.emit(
+            TraceRecord(
+                ts=_now(),
+                direction="CORE",
+                kind="event",
+                layer="event",
+                run_id=event_dict.get("run_id"),
+                data=event_dict
+            )
+        )
+
     
     #启动一次 agent run：立即返回 run_id， 后台 task 执行 runner.run()
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
         assert self._config is not None
+        """
+        在 stage/s2 之前都还是限制并发的，一次只能有一个 agent 在运行。修改成现在这样之后接收所有的请求
+        """
         cmd=AgentRunCommand.model_validate(params)
-
-        if self._current_run_task is not None and not self._current_run_task.done():
-            raise RuntimeError("a run is already in progress")
-        
         run_id = new_run_id()
-        runner = AgentRunner(self._config, bus=self._bus)
-
-        self._current_run_task = asyncio.create_task(
-            runner.run(cmd.goal, run_id=run_id)
-        )
+        runner = AgentRunner(self._config, bus=self._bus,trace=self._trace)
+        run_task = asyncio.create_task(runner.run(cmd.goal, run_id=run_id))
+        self._running_runs.add(run_task)
+        run_task.add_done_callback(self._running_runs.discard)
         return AgentRunResult(run_id=run_id)
 
     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
@@ -73,7 +98,9 @@ class CoreApp:
         replayed_count = 0
         if cmd.replay_from_run is not None:
             replayed_count = await self._replay_events(cmd.replay_from_run, writer, cmd.topics)
-        
+
+
+        assert self._broadcaster is not None
         sub_id = self._broadcaster.subscribe(writer, cmd.topics, scope=cmd.scope)
         return EventSubscribeResult(subscription_id=sub_id, replayed_count=replayed_count)
 
@@ -113,7 +140,16 @@ class CoreApp:
         self._config = get_config()
         setup_logging(self._config)
 
-        server = SocketServer(self._config.host, self._config.port, self._broadcaster)
+        if self._config.trace.enabled:
+            trace_path = Path(self._config.trace.file).expanduser()
+            self._trace = TraceWriter(trace_path)
+            await self._trace.start()
+            self._bus.subscribe(self._trace_event_handler)
+
+        self._broadcaster = IpcEventBroadcaster(trace=self._trace)
+        self._bus.subscribe(self._broadcaster.handle)
+
+        server = SocketServer(self._config.host, self._config.port, self._broadcaster, self._trace)
         server.register("core.ping", self._ping_handler)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
@@ -136,12 +172,13 @@ class CoreApp:
         await shutdown.wait()
 
         logger.info("shutting down")
+        for task in list(self._running_runs):
+            task.cancel()
+        if self._running_runs:
+            await asyncio.gather(*self._running_runs, return_exceptions=True)
         await server.stop()
-
+        if self._trace is not None:
+            await self._trace.stop()
 
 def run() -> None:
     asyncio.run(CoreApp().run())
-
-
-
-

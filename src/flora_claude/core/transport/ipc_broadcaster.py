@@ -4,13 +4,19 @@ import asyncio
 import fnmatch
 import logging
 import uuid
+from datetime import UTC,datetime
 
 from dataclasses import dataclass
 from pydantic import BaseModel
 
 from flora_claude.core.bus.envelope import EventPushEnvelope
+from flora_claude.core.trace.writer import TraceWriter
+from flora_claude.core.trace.record import TraceRecord
 
 logger = logging.getLogger(__name__)
+
+def _now():
+    return datetime.now(UTC).isoformat()
 
 @dataclass
 class _Subscription:
@@ -21,8 +27,9 @@ class _Subscription:
 
 
 class IpcEventBroadcaster:
-    def __init__(self) -> None:
+    def __init__(self, trace: TraceWriter | None = None) -> None:
         self._subscriptions: list[_Subscription] = []
+        self._trace = trace
 
     
     def subscribe(
@@ -65,6 +72,19 @@ class IpcEventBroadcaster:
                 envelope = EventPushEnvelope(event=event_dict)
                 sub.writer.write(envelope.model_dump_json().encode() + b"\n")
                 await sub.writer.drain()
+                if self._trace is not None:
+                    client_id = str(sub.writer.get_extra_info("peername", "<unknown>"))
+                    self._trace.emit(
+                        TraceRecord(
+                            ts=_now(),
+                            direction="CORE->CLIENT",
+                            layer="ipc",
+                            client_id=client_id,
+                            kind="push",
+                            run_id=run_id,
+                            data={"sub_id": sub.sub_id, "event_type": event_type}
+                        )
+                    )
             except (ConnectionResetError, BrokenPipeError, OSError):
                 logger.debug("dead connection for sub %s, scheduling cleanup", sub.sub_id)
                 dead.append(sub.writer)

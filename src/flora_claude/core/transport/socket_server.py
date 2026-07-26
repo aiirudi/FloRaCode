@@ -6,12 +6,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any
+from datetime import UTC, datetime
 
 from pydantic import  BaseModel, ValidationError
 
 
 from flora_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
-
+from flora_claude.core.trace.record import TraceRecord
+from flora_claude.core.trace.writer import TraceWriter
 from flora_claude.core.bus.envelope import (
     INTERNAL_ERROR,
     PARSE_ERROR,
@@ -19,6 +21,8 @@ from flora_claude.core.bus.envelope import (
     INVALID_REQUEST,
     JsonRpcRequest,
     JsonRpcSuccess,
+    JsonRpcError,
+    HandlerError,
     make_error
 )
 
@@ -28,6 +32,9 @@ type CommandHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 # 每个连接处理协程中，当前正在处理的 writer（供 handler 读取连接上下文）
 _writer_var: ContextVar[asyncio.StreamWriter] = ContextVar("_writer_var")
 
+def _now():
+    return datetime.now(UTC).isoformat()
+
 # 返回当前 handler 调用所属连接的 StreamWriter
 def get_connection_writer() -> asyncio.StreamWriter:
     return _writer_var.get()
@@ -35,12 +42,13 @@ def get_connection_writer() -> asyncio.StreamWriter:
 _MAX_LINE_BYTES = 1 * 1024 * 1024
 
 class SocketServer:
-    def __init__(self, host: str, port: int, broadcaster: IpcEventBroadcaster | None = None) -> None:
+    def __init__(self, host: str, port: int, broadcaster: IpcEventBroadcaster | None = None, trace: TraceWriter | None = None) -> None:
         self._host = host
         self._port = port
         self._handlers: dict[str, CommandHandler] = {}
         self._server: asyncio.AbstractServer | None = None
         self._broadcaster = broadcaster
+        self._trace = trace
     
     def register(self, method: str, handler: CommandHandler) -> None:
         self._handlers[method] = handler
@@ -123,6 +131,20 @@ class SocketServer:
         except ValidationError as e:
             await self._send(writer, make_error(None, INVALID_REQUEST, "Invalid Request", str(e)))
             return
+
+        if self._trace is not None:
+            client_id = str(writer.get_extra_info("peername", "<unknown>"))
+
+            self._trace.emit(
+               TraceRecord(
+                    ts=_now(),
+                    client_id=client_id,
+                    layer="ipc",
+                    direction="CLIENT->CORE",
+                    kind="command",
+                    data={"method": req.method,"id":req.id, "params": req.params}
+                )
+            ) 
         
         handler = self._handlers.get(req.method)
         if handler is None:
@@ -133,6 +155,9 @@ class SocketServer:
         _writer_var.set(writer)
         try:
             result = await handler(req.params)
+        except HandlerError as e:
+            await self._send(writer, make_error(req.id, e.code, str(e), e.data))
+            return 
         except ValidationError as e:
             await self._send(writer, make_error(req.id, INVALID_REQUEST, "Invalid params", str(e)))
             return 
@@ -148,3 +173,18 @@ class SocketServer:
     async def _send(self, writer: asyncio.StreamWriter, msg:BaseModel) -> None:
         writer.write(msg.model_dump_json().encode() + b"\n")
         await writer.drain()
+
+        if self._trace is not None:
+            kind = "error" if isinstance(msg, JsonRpcError) else "response"
+            client_id = str(writer.get_extra_info("peername", "<unknown>"))
+
+            self._trace.emit(
+                TraceRecord(
+                    ts=_now(),
+                    direction="CORE->CLIENT",
+                    layer="ipc",
+                    kind=kind,
+                    client_id=client_id,
+                    data=msg.model_dump()
+                )
+            )

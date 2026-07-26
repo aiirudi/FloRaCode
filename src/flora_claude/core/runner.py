@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from dataclasses import dataclass
 
 from flora_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from flora_claude.core.config import FloRaConfig
@@ -19,6 +20,11 @@ from flora_claude.core.tools.registry import ToolRegistry
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
+@dataclass
+class RunOutcome:
+    status: str
+    result: str
+    reason: str | None
 
 class AgentRunner:
     # 组装所有运行时依赖，准备执行一次完整的 agent run
@@ -37,8 +43,11 @@ class AgentRunner:
         self._extra_handlers: list[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
 
+    async def run(self, goal: str, *, run_id: str | None = None) -> None:
+        await self.run_and_capture(goal, run_id=run_id)
+
     # 执行一次完整的 agent run：生成 run_id、接线事件总线、驱动 AgentLoop
-    async def run(self, goal: str, * , run_id: str | None = None) -> None:
+    async def run_and_capture(self, goal: str, * , run_id: str | None = None) -> RunOutcome:
         # 接受外部传入的 id
         run_id = run_id or new_run_id()
         run_path = self._runs_dir / run_id
@@ -84,3 +93,9 @@ class AgentRunner:
 
         if cancelled:
             raise asyncio.CancelledError()
+
+        return RunOutcome(
+            status=context.status,
+            result=context.result,
+            reason=context.reason
+        )
