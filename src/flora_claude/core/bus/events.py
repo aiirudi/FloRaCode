@@ -50,6 +50,7 @@ class ToolCallFinishedEvent(BaseModel):
     tool_name: str
     elapsed_ms: int
     ts: str
+    output: str = ""
 
 class ToolCallFailedEvent(BaseModel):
     type: Literal["tool.call_failed"] = "tool.call_failed"
