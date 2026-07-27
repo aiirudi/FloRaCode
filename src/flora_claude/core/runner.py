@@ -13,9 +13,21 @@ from flora_claude.core.events.writer import EventWriter
 from flora_claude.core.llm.base import LLMProvider
 from flora_claude.core.llm.provider import AnthropicProvider
 from flora_claude.core.loop import AgentLoop
+from flora_claude.core.task.manager import TaskManager
+from flora_claude.core.tools.builtin import (
+    BashTool,
+    ListDirTool,
+    ReadFileTool,
+    TaskCreateTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskUpdateTool,
+    WriteFileTool,
+)
 from flora_claude.core.runs import RUNS_DIR, new_run_id
-from flora_claude.core.tools.builtin.read_file import ReadFileTool
 from flora_claude.core.tools.registry import ToolRegistry
+from flora_claude.core.trace.writer import TraceWriter
+from flora_claude.core.trace.provider import TraceProvider
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -36,12 +48,27 @@ class AgentRunner:
         provider: LLMProvider | None = None,
         extra_handlers: list[EventHandler] | None = None,
         runs_dir: Path | None = None,
+        trace: TraceWriter | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
         self._bus = bus
         self._extra_handlers: list[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
+        self._trace = trace
+
+    def _build_registry(self, task_manager: TaskManager) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry.register(ReadFileTool())
+        registry.register(BashTool())
+        registry.register(WriteFileTool())
+        registry.register(ListDirTool())
+        registry.register(TaskCreateTool(task_manager))
+        registry.register(TaskUpdateTool(task_manager))
+        registry.register(TaskListTool(task_manager))
+        registry.register(TaskGetTool(task_manager))
+        return registry
+
 
     async def run(self, goal: str, *, run_id: str | None = None) -> None:
         await self.run_and_capture(goal, run_id=run_id)
@@ -52,6 +79,8 @@ class AgentRunner:
         run_id = run_id or new_run_id()
         run_path = self._runs_dir / run_id
         run_path.mkdir(parents=True, exist_ok=True)
+
+        task_manager = TaskManager(run_path / ".tasks")
 
         bus = self._bus if self._bus is not None else EventBus()
         
@@ -69,8 +98,13 @@ class AgentRunner:
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
             
             provider = self._provider or AnthropicProvider(self._config.llm.default_model)
-            registry = ToolRegistry()
-            registry.register(ReadFileTool())
+            if self._trace is not None:
+                provider = TraceProvider(
+                    provider,
+                    self._trace,
+                    include_payload=self._config.trace.include_llm_payload
+                )
+            registry = self._build_registry(task_manager)
             loop = AgentLoop(provider, registry, bus)
 
             cancelled = False

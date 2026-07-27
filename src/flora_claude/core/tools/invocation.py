@@ -16,7 +16,7 @@ from flora_claude.core.llm.types import ToolCallBlock
 from flora_claude.core.tools.base import ToolResult
 from flora_claude.core.tools.registry import ToolRegistry
 
-_DEFAULT_TIMEOUT: float = 10.0
+_DEFAULT_TIMEOUT: float = 120.0
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()

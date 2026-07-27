@@ -39,7 +39,7 @@ class TaskManager:
         path.write_text(json.dumps(task.to_dict(), indent=2, ensure_ascii=False))
 
     # 创建新任务, 写入 JSON 文件, 返回 Task
-    def create(self,subject: str,description: str = "", blocked_by: list[int] | None = None):
+    def create(self,subject: str,description: str = "", blocked_by: list[int] | None = None) -> Task:
         for dep_id in (blocked_by or []):
             path = self._dir / f"task_{dep_id}.json"
             if not path.exists():
