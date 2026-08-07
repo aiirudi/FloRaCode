@@ -8,11 +8,20 @@ import sys
 from pathlib import Path
 
 from flora_claude.core.bus.commands import (
-    PingCommand, PongResult,
     AgentRunCommand,
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
+    PingCommand,
+    PongResult,
+    SessionCloseCommand,
+    SessionCloseResult,
+    SessionCreateCommand,
+    SessionCreateResult,
+    SessionGetHistoryCommand,
+    SessionGetHistoryResult,
+    SessionSendMessageCommand,
+    SessionSendMessageResult,
 )
 from flora_claude.core.bus.envelope import EventPushEnvelope
 from flora_claude.core.bus.events import (
@@ -23,6 +32,11 @@ from flora_claude.core.bus.events import (
     LogLineEvent,
     RunFinishedEvent,
     RunStartedEvent,
+    SessionClosedEvent,
+    SessionCreatedEvent,
+    SessionMessageReceivedEvent,
+    SessionResumedEvent,
+    SessionWaitingForInputEvent,
     StepFinishedEvent,
     StepStartedEvent,
     ToolCallFailedEvent,
@@ -33,6 +47,10 @@ from flora_claude.core.bus.events import (
 _OUTPUT_PATH = Path(__file__).parent.parent / "WIRE_PROTOCOL.md"
 
 
+_OUTPUT_PATH = Path(__file__).parent.parent / "WIRE_PROTOCOL.md"
+
+
+# 从 pydantic 模型生成一个带字段表、JSON Schema 和可选示例的 Markdown 小节
 def _model_section(name: str, model: type, example: dict | None = None) -> str:  # type: ignore[type-arg]
     schema = model.model_json_schema()  # type: ignore[attr-defined]
     props = schema.get("properties", {})
@@ -55,7 +73,6 @@ def _model_section(name: str, model: type, example: dict | None = None) -> str: 
         example_block = f"\n**Example:**\n\n```json\n{json.dumps(example, indent=2)}\n```\n"
 
     return f"### {name}\n{table}{schema_block}{example_block}"
-
 
 
 # 生成完整的 WIRE_PROTOCOL.md 文档字符串
@@ -104,6 +121,29 @@ def generate() -> str:
         "id": "u-3",
         "result": {"subscription_id": "sub-abc123", "replayed_count": 0},
     }
+    session_id = "sess-abc123def456"
+    session_create_req_example = {
+        "jsonrpc": "2.0",
+        "id": "u-4",
+        "method": "session.create",
+        "params": {"mode": "chat", "title": ""},
+    }
+    session_create_resp_example = {
+        "jsonrpc": "2.0",
+        "id": "u-4",
+        "result": {"session_id": session_id, "status": "active"},
+    }
+    session_send_req_example = {
+        "jsonrpc": "2.0",
+        "id": "u-5",
+        "method": "session.send_message",
+        "params": {"session_id": session_id, "content": "总结 README.md"},
+    }
+    session_send_resp_example = {
+        "jsonrpc": "2.0",
+        "id": "u-5",
+        "result": {"run_id": run_id},
+    }
     event_push_example = {
         "kind": "event",
         "event": {
@@ -134,6 +174,22 @@ def generate() -> str:
         _model_section("EventSubscribeCommand", EventSubscribeCommand, subscribe_req_example),
         "\n",
         _model_section("EventSubscribeResult", EventSubscribeResult, subscribe_resp_example),
+        "\n",
+        _model_section("SessionCreateCommand", SessionCreateCommand, session_create_req_example),
+        "\n",
+        _model_section("SessionCreateResult", SessionCreateResult, session_create_resp_example),
+        "\n",
+        _model_section("SessionSendMessageCommand", SessionSendMessageCommand, session_send_req_example),
+        "\n",
+        _model_section("SessionSendMessageResult", SessionSendMessageResult, session_send_resp_example),
+        "\n",
+        _model_section("SessionGetHistoryCommand", SessionGetHistoryCommand),
+        "\n",
+        _model_section("SessionGetHistoryResult", SessionGetHistoryResult),
+        "\n",
+        _model_section("SessionCloseCommand", SessionCloseCommand),
+        "\n",
+        _model_section("SessionCloseResult", SessionCloseResult),
         "\n## Server Push\n\n",
         "Events pushed from daemon to subscribed clients over the same TCP connection.\n\n",
         _model_section("EventPushEnvelope", EventPushEnvelope, event_push_example),
@@ -182,6 +238,23 @@ def generate() -> str:
         _model_section("LogLineEvent", LogLineEvent,
             {"type": "log.line", "run_id": run_id, "level": "INFO",
              "source": "flora_claude.core.loop", "message": "step 1 started", "ts": ts}),
+        "\n## Session Events\n\n",
+        _model_section("SessionCreatedEvent", SessionCreatedEvent,
+            {"type": "session.created", "session_id": session_id, "mode": "chat", "ts": ts}),
+        "\n",
+        _model_section("SessionMessageReceivedEvent", SessionMessageReceivedEvent,
+            {"type": "session.message_received", "session_id": session_id,
+             "content": "总结 README.md", "ts": ts}),
+        "\n",
+        _model_section("SessionWaitingForInputEvent", SessionWaitingForInputEvent,
+            {"type": "session.waiting_for_input", "session_id": session_id,
+             "last_run_id": run_id, "ts": ts}),
+        "\n",
+        _model_section("SessionResumedEvent", SessionResumedEvent,
+            {"type": "session.resumed", "session_id": session_id, "ts": ts}),
+        "\n",
+        _model_section("SessionClosedEvent", SessionClosedEvent,
+            {"type": "session.closed", "session_id": session_id, "ts": ts}),
         "\n## Error Codes\n\n",
         "| Code | Name | Meaning |\n",
         "|------|------|---------|\n",

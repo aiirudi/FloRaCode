@@ -6,5 +6,6 @@ from flora_claude.core.tools.builtin.task_get import TaskGetTool
 from flora_claude.core.tools.builtin.task_update import TaskUpdateTool
 from flora_claude.core.tools.builtin.task_list import TaskListTool
 from flora_claude.core.tools.builtin.write_file import WriteFileTool
+from flora_claude.core.tools.builtin.note_save import NoteSaveTool
 
-__all__ = ["ReadFileTool", "ListDirTool", "BashTool", "TaskCreateTool", "TaskGetTool", "TaskUpdateTool", "TaskListTool", "WriteFileTool"]
+__all__ = ["ReadFileTool", "ListDirTool", "BashTool", "TaskCreateTool", "TaskGetTool", "TaskUpdateTool", "TaskListTool", "WriteFileTool", "NoteSaveTool"]

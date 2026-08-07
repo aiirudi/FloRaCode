@@ -37,12 +37,14 @@ class TraceProvider:
         run_id: str,
         *,
         step: int = 0,
+        system: str | None = None,
     ):
         call_data: dict[str, Any]
         if self._include_payload:
             call_data = {
                 "messages": messages,
                 "tool_schemas": tool_schemas,
+                "system": system,
             }
         else:
             call_data = {
@@ -68,7 +70,8 @@ class TraceProvider:
             tool_schemas=tool_schemas,
             bus=bus,
             run_id=run_id,
-            step=step
+            step=step,
+            system=system
         )
         latency_ms = int((time.monotonic() - t0) * 1000)
 
