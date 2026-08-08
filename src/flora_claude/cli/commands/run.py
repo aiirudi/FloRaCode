@@ -112,6 +112,8 @@ async def _run_async(goal: str, config: FloRaConfig) -> int:
                 "goal": goal
             }
         )
+        
+
     except IpcError as e:
         print(f"error: {e}", file=sys.stderr)
         loop_task.cancel()

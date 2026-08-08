@@ -6,7 +6,7 @@
 
 - TCP loopback `127.0.0.1:7437` (override via `FLORA_HOST` / `FLORA_PORT`)
 - Each message is one `\n`-terminated JSON line (NDJSON)
-- Commands use JSON-RPC 2.0 (client ¡ú server); Events use `kind=event` envelope (server ¡ú client)
+- Commands use JSON-RPC 2.0 (client ï¿½ï¿½ server); Events use `kind=event` envelope (server ï¿½ï¿½ client)
 
 ## Commands
 
@@ -631,7 +631,7 @@ Events pushed from daemon to subscribed clients over the same TCP connection.
 
 ## IPC Events
 
-Events sent over the IPC socket (daemon ¡ú client).
+Events sent over the IPC socket (daemon ï¿½ï¿½ client).
 
 ### CoreStartedEvent
 

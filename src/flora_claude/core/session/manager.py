@@ -8,7 +8,10 @@ from typing import Any
 
 from flora_claude.core.session.model import Session,SessionMode, SessionStatus
 from flora_claude.core.session.store import SessionStore
-from flora_claude.core.runner import AgentRunner
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from flora_claude.core.runner import AgentRunner
 from flora_claude.core.events.bus import EventBus
 from flora_claude.core.bus.events import SessionCreatedEvent, SessionResumedEvent, SessionMessageReceivedEvent, SessionClosedEvent, SessionWaitingForInputEvent
 from flora_claude.core.bus.envelope import HandlerError
