@@ -47,9 +47,6 @@ from flora_claude.core.bus.events import (
 _OUTPUT_PATH = Path(__file__).parent.parent / "WIRE_PROTOCOL.md"
 
 
-_OUTPUT_PATH = Path(__file__).parent.parent / "WIRE_PROTOCOL.md"
-
-
 # 从 pydantic 模型生成一个带字段表、JSON Schema 和可选示例的 Markdown 小节
 def _model_section(name: str, model: type, example: dict | None = None) -> str:  # type: ignore[type-arg]
     schema = model.model_json_schema()  # type: ignore[attr-defined]
@@ -221,8 +218,8 @@ def generate() -> str:
         "\n",
         _model_section("ToolCallFailedEvent", ToolCallFailedEvent,
             {"type": "tool.call_failed", "run_id": run_id, "tool_use_id": "toolu_02",
-             "tool_name": "read_file", "error_type": "runtime_error",
-             "error_message": "file not found", "elapsed_ms": 1, "ts": ts}),
+             "tool_name": "read_file", "error_class": "runtime_error",
+             "error_message": "file not found", "elapsed_ms": 1, "attempt": 1, "ts": ts}),
         "\n",
         _model_section("LlmModelSelectedEvent", LlmModelSelectedEvent,
             {"type": "llm.model_selected", "run_id": run_id,

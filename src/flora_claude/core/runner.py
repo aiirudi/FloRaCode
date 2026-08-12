@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from flora_claude.core.trace.writer import TraceWriter
 from flora_claude.core.trace.provider import TraceProvider
 from flora_claude.core.session.model import Session
 from flora_claude.core.session.store import SessionStore
+from flora_claude.core.permissions.manager import PermissionManager
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -52,6 +54,7 @@ class AgentRunner:
         extra_handlers: list[EventHandler] | None = None,
         runs_dir: Path | None = None,
         trace: TraceWriter | None = None,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
@@ -59,6 +62,7 @@ class AgentRunner:
         self._extra_handlers: list[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
         self._trace = trace
+        self._permission_manager = permission_manager
 
     def _build_registry(
             self, 
@@ -135,7 +139,7 @@ class AgentRunner:
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload
                     )
-                loop = AgentLoop(provider, registry, bus)
+                loop = AgentLoop(provider, registry, bus, permission_manager=self._permission_manager, session_id=session.id if session is not None else "")
 
                 await loop.run(context)
             except asyncio.CancelledError:
@@ -143,6 +147,9 @@ class AgentRunner:
                 if not context.is_done():
                     context.mark_failed("cancelled")
             except Exception:
+                logging.getLogger(__name__).exception(
+                    "agent run failed run_id=%s step=%d", run_id, context.step
+                )
                 if not context.is_done():
                     context.mark_failed("llm_error")
 
@@ -156,8 +163,8 @@ class AgentRunner:
                 )
             )
 
-            if session is not None and store is not None:
-                store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+        if session is not None and store is not None:
+            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
 
         if cancelled:
             raise asyncio.CancelledError()

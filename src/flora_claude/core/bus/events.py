@@ -57,9 +57,11 @@ class ToolCallFailedEvent(BaseModel):
     run_id: str
     tool_use_id: str
     tool_name: str
-    error_type: str # "runtime_error" | "timeout" | "schema_error"
+    # "runtime_error" | "timeout" | "schema_error" | "permission_denied" | "rated_limited"
+    error_class: str 
     error_message: str
     elapsed_ms: int
+    attempt: int = 1 # 1 = first attempt, 2 = first retry, 3 = second retry
     ts: str
 
 class LlmTokenEvent(BaseModel):
@@ -120,6 +122,32 @@ class SessionClosedEvent(BaseModel):
     session_id: str
     ts: str
 
+class PermissionRequestedEvent(BaseModel):
+    type: Literal["permission.requested"] = "permission.requested"
+    run_id: str
+    tool_use_id: str
+    tool_name: str
+    params: dict[str, Any]
+    param_preview: str
+    session_id: str
+    ts: str
+
+class PermissionGrantedEvent(BaseModel):
+    type: Literal["permission.granted"] = "permission.granted"
+    run_id: str
+    tool_use_id: str
+    # "allow_once" | "always_allow" | "auto_allow"
+    decision: str
+    ts: str
+
+class PermissionDeniedEvent(BaseModel):
+    type: Literal["permission.denied"] = "permission.denied"
+    run_id: str
+    tool_use_id: str
+    # "deny_once" | "always_deny" | "auto_deny"
+    decision: str
+    ts: str
+
 Event = Annotated[
     CoreStartedEvent
     | RunStartedEvent
@@ -137,6 +165,9 @@ Event = Annotated[
     | SessionMessageReceivedEvent
     | SessionWaitingForInputEvent
     | SessionClosedEvent
-    | SessionResumedEvent,
+    | SessionResumedEvent
+    | PermissionRequestedEvent
+    | PermissionGrantedEvent
+    | PermissionDeniedEvent,
     Discriminator("type"),
 ]

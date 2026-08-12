@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from flora_claude.core.session.store import SessionStore
 from flora_claude.core.tools.base import BaseTool, ToolResult
 
+class NoteSaveParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    content: str
+
 class NoteSaveTool(BaseTool):
+    params_model = NoteSaveParams
     name="note_save"
     description=(
         "Save a concise fact or decision to this session's notes. "
@@ -26,8 +33,8 @@ class NoteSaveTool(BaseTool):
         self._run_id = run_id
         self._session_id = session_id
 
-    async def invoke(self, params: list[dict[str, object]]):
-        content = str(params.get("content", "")).strip()
+    async def invoke(self, params: dict[str, object]) -> ToolResult:
+        content = NoteSaveParams.model_validate(params).content.strip()
         if not content:
             return ToolResult(
                 content="empty content",

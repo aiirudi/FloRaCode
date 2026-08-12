@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from flora_claude.core.tools.base import BaseTool, ToolResult
 
 _MAX_BYTES = 512 * 1024
 
+class ReadFileParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    path: str
+
 class ReadFileTool(BaseTool):
+    params_model = ReadFileParams
     name="read_file"
     description = (
         "Read the text content of a file. "
@@ -25,7 +32,8 @@ class ReadFileTool(BaseTool):
     }
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
-        path_str = str(params["path"])
+        p = ReadFileParams.model_validate(params)
+        path_str = p.path
 
         # 避免用户穿越到敏感路径下读取文件
         if ".." in Path(path_str).parts:

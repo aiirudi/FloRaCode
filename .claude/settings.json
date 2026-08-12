@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log *)",
+      "Bash(xxd \"src\\\\flora_claude\\\\core\\\\config.py\")",
+      "Bash(xxd)",
+      "Bash(python3 -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py', encoding='utf-8'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}

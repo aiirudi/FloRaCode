@@ -15,7 +15,7 @@ _DEFAULT_LOG_FILE = "~/.flora/logs/core.log"
 _DEFAULT_LOG_FORMAT = "text"
 _DEFAULT_CONFIG_PATH = "~/.flora/config.toml"
 _DEFAULT_MAX_STEPS = 20 # Agent 最多的迭代步数
-_DEFAULT_MODEL = "deepseek-v4-pro"
+_DEFAULT_MODEL = "deepseek-v4-flash"
 _DEFAULT_TRACE_FILE = "~/.flora/traces/daemon.jsonl"
 
 @dataclass
@@ -41,6 +41,11 @@ class TraceConfig:
 
 
 @dataclass
+class PermissionConfig:
+    timeout_s: float = 60.0 # 审批超市秒数， 0 为不会超时
+
+
+@dataclass
 class FloRaConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
@@ -48,6 +53,7 @@ class FloRaConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
+    permission: PermissionConfig = field(default_factory=PermissionConfig)
 
 
 # 构建并返回运行时配置: 默认值 -> TOML -> .env -> 系统环境变量 (后者优先级最高)
@@ -72,7 +78,7 @@ def get_config() -> FloRaConfig:
 
 
 def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -151,7 +157,7 @@ def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
             raise SystemExit("Config error: [trace] must be a table")
         unknown_trace = set(trace.keys() - {"enabled", "file", "include_llm_payload"})
         if unknown_trace:
-            raise SystemExit(f"Unkonwn [trace] keys: {", ".join(sorted(unknown_trace))}")
+            raise SystemExit(f"Unknown [trace] keys: {", ".join(sorted(unknown_trace))}")
 
         if "enabled" in trace:
             val = trace["enabled"]
@@ -170,8 +176,21 @@ def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, bool):
                 raise SystemExit("Config error: trace.include_llm_payload must be a boolean")
             config.trace.include_llm_payload = val
-        
 
+    if "permission" in data:
+        permission = data["permission"]
+        if not isinstance(permission, dict):
+            raise SystemExit("Config error: [permission] must be a table")
+
+        unknown_permission: set[str] = set(permission.keys()) - {"timeout_s"}
+        if unknown_permission:
+            raise SystemExit(f"Unknown [permission] keys: {", ".join(sorted(unknown_permission))}")
+
+        if "timeout_s" in permission:
+            val = permission["timeout_s"]
+            if not isinstance(val, (int, float)) or val < 0:
+                raise SystemExit("Config error: permission.timeout_s must be a float or integer")
+            config.permission.timeout_s = float(val)
 
 def _apply_env(config: FloRaConfig) -> None:
     host = os.environ.get("FLORA_HOST")
@@ -226,4 +245,18 @@ def _apply_env(config: FloRaConfig) -> None:
     trace_payload = os.environ.get("FLORA_TRACE_INCLUDE_LLM_PAYLOAD")
     if trace_payload is not None:
         config.trace.include_llm_payload = trace_payload.lower() not in ("0", "false", "no", "f")
+
+    permission_timeout = os.environ.get("FLORA_PERMISSION_TIMEOUT_S")
+    if permission_timeout is not None:
+        try:
+            val = float(permission_timeout)
+            if val < 0:
+                raise SystemExit(
+                    f"Config error: FLORA_PERMISSION_TIMEOUT_S must be >= 0, got: {permission_timeout!r}"
+                )
+            config.permission.timeout_s = val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: FLORA_PERMISSION_TIMEOUT_S must be a number, got: {permission_timeout!r}"
+            )
         

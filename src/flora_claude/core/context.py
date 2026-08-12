@@ -32,11 +32,11 @@ class ExecutionContext:
     def system_prompt(self, base: str) -> str:
         if not self.session_notes.strip():
             return base
-
         return (
-            base + "\n\n## Session Notes\n" 
-            + self.session_notes.strip() + 
-            "\n\nRemember important durable facts by calling note_save."
+            base
+            + "\n\n## Session Notes\n"
+            + self.session_notes.strip()
+            + "\n\nRemember important durable facts by calling note_save."
         )
 
     # 将 LLM 响应的content blocks 追加为 assistant 消息

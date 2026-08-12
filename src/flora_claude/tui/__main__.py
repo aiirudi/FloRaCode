@@ -1,9 +1,35 @@
 from __future__ import annotations
 
+import os
+import logging
+import logging.handlers
 import argparse
+from pathlib import Path
 
 from flora_claude.core.config import get_config
 from flora_claude.tui.app import FloRaTuiApp
+
+_DEFAULT_TUI_LOG = "~/.flora/logs/tui.log"
+
+# TUI 文件日志初始化：不写 stderr（避免干扰 Textual 渲染），只写滚动文件
+def _setup_logging(level: str) -> None:
+    log_path = Path(os.environ.get("FLORA_TUI_LOG_FILE", _DEFAULT_TUI_LOG)).expanduser()
+    log_path.parent.mkdir(exist_ok=True, parents=True)
+
+    handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
+        encoding="utf-8"
+    )
+    handler.setFormatter(
+        logging.Formatter(
+            "level=%(levelname)s ts=%(asctime)s source=%(name)s msg=%(message)s"
+        )
+    )
+    
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level.upper(), logging.DEBUG))
+    root.handlers.clear()
+    root.addHandler(handler)
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="flora-tui", description="FloRaClaude TUI")
@@ -13,6 +39,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = get_config()
+    _setup_logging(config.logging.level)
     app = FloRaTuiApp(config.host, config.port, replay_run_id=args.replay)
     app.run()
 

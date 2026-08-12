@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from flora_claude.core.llm.base import LLMProvider
 from flora_claude.core.tools.registry import ToolRegistry
@@ -10,15 +11,28 @@ from flora_claude.core.context import ExecutionContext
 from flora_claude.core.bus.events import StepStartedEvent, StepFinishedEvent
 from flora_claude.core.tools.invocation import invoke_tool
 
+if TYPE_CHECKING:
+    from flora_claude.core.permissions import PermissionManager
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 class AgentLoop:
     # 初始化循环需要三个依赖 LLM Provider、工具注册表、事件总线
-    def __init__(self, provider: LLMProvider, registry: ToolRegistry, bus: EventBus) -> None:
+    def __init__(
+            self, 
+            provider: LLMProvider, 
+            registry: ToolRegistry, 
+            bus: EventBus,
+            *,
+            permission_manager: PermissionManager | None = None,
+            session_id: str = ""
+        ) -> None:
         self._provider = provider
         self._registry = registry
         self._bus = bus
+        self._permission_manager = permission_manager
+        self._session_id = session_id
     
 
     # 驱动 plan->act->observe 循环直到上下文终止; CancelledError 向上传播
@@ -68,7 +82,7 @@ class AgentLoop:
                 for tc in response.tool_calls:
                     result = await invoke_tool(
                         self._registry, tc, self._bus,
-                        context.run_id
+                        context.run_id, permission_manager=self._permission_manager, session_id=self._session_id
                     )
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
             

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import asyncio
 import json
 from typing import Any
@@ -16,6 +17,8 @@ from textual.css.query import NoMatches
 
 from flora_claude.core.config import FloRaConfig
 from flora_claude.core.transport.socket_client import IpcError, SocketClient
+
+log = logging.getLogger(__name__)
 
 def _preview(s: str, n: int)-> str:
     return s[:n] + "…" if len(s) > n else s
@@ -129,6 +132,164 @@ class ToolCallBlock(Widget):
             )
             self.add_class("expanded")
 
+class PermissionSelect(Static):
+    """内联权限选择控件：挂载在日志流中，键盘焦点无需 ModalScreen。"""
+    can_focus = True
+
+    DEFAULT_CSS = """
+    PermissionSelect {
+        height: auto;
+        padding: 0 2;
+        margin-bottom: 1;
+    }
+    """
+
+    # tuple[tuple[str, str, str], ...] 外层的 ... 表示可以包含任意数量的 三个字符元组
+    _CHOICES: tuple[tuple[str, str, str], ...] = (
+        ("allow_once",      "Allow once", "y / 1"),
+        ("always_allow",  "Always allow", "a / 2"),
+        ("deny_once",             "Deny", "n / 3"),
+        ("always_deny",    "Always deny", "d / 4"),
+    )
+
+    _KEY_MAP: dict[str, str] = {
+        "y": "allow_once",   "1": "allow_once",
+        "a": "always_allow", "2": "always_allow",
+        "n": "deny_once",    "3": "deny_once",
+        "d": "always_deny",  "4": "always_deny",
+    }
+
+    # 用户作出权限决策时发布，携带工具 ID 和决策字符串
+    class Decided(Message):
+        # 初始化决策消息块，存储控件引用、工具ID 和决策
+        def __init__(self, widget: "PermissionSelect", tool_use_id: str, decision: str) -> None:
+            self.widget = widget
+            self.tool_use_id = tool_use_id
+            self.decision = decision
+            super().__init__()
+
+    # 初始化控件，存储工具 ID （用于 IPC 回复）
+    def __init__(self, tool_use_id: str) -> None:
+        super().__init__("")
+        self._tool_use_id = tool_use_id
+        self._cursor = 0
+
+    def on_mount(self) -> None:
+        self.update(self._render_ui())
+
+        # 主动让这个组件获得焦点
+        self.focus()
+        log.debug(
+            "PermissionSelect.on_mount  can_focus=%s  focused_after=%r",
+            self.can_focus, # 当前组件是否能获取焦点
+            self.app.focused,# 当前APP 中真正获取焦点的组件
+        )
+        self.app.call_after_refresh(self._log_deferred_focus)
+
+    # 在下一帧记录焦点是否真正转移到本控件
+    def _log_deferred_focus(self) -> None:
+        log.debug(
+            "PermissionSelect.deferred_focus  app.focused=%r  has_focus=%s  focusable=%s",
+            self.app.focused,
+            self.has_focus,
+            self.focusable,
+        )
+
+    # 焦点到达时记录，用于确认 focus() 是否生效
+    def on_focus(self, event: events.Focus):
+        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r", self.has_focus, self.app.focused)
+
+    # 焦点离开时记录，用于追踪是否被其他控件抢走焦点
+    def on_blur(self, event: events.Blur) -> None:
+        log.debug("PermissionSelect.on_blur  app.focused=%r", self.app.focused)
+    
+    # 生成带光标高亮的选项列表文本 
+    def _render_ui(self) -> str:
+        lines: list[str] = []
+        for i, (_, label, key_hint) in enumerate(self._CHOICES):
+            if i == self._cursor:
+                lines.append(f"  [bold cyan]> {label}[/]  [dim]{key_hint}[/]")
+            else:
+                lines.append(f"  {label} [dim]{key_hint}[/]")
+        lines.append("[dim]  ↑↓ navigate   enter confirm[/dim]")
+        return "\n".join(lines)
+
+    # 方向键导航，快捷键直接选择； enter确认光标位置
+    def on_key(self, event: events.Key) -> None:
+        log.debug("PermissionSelect.on_key  key=%r  char=%r", event.key, event.character)
+        key = event.key
+        if key in ("up", "k"):
+            event.stop()
+            self._cursor = (self._cursor - 1) % len(self._CHOICES)
+            self.update(self._render_ui())
+        elif key in ("down", "j"):
+            event.stop()
+            self._cursor = (self._cursor + 1) % len(self._CHOICES)
+            self.update(self._render_ui())
+        elif key == "enter":
+            event.stop()
+            self._pick(self._CHOICES[self._cursor][0])
+        else:
+            decision = self._KEY_MAP.get(key)
+            if decision is not None:
+                event.stop()
+                self._pick(decision)
+
+    # 发布消息决策，由于宿主 APP 负责 IPC 回复和控件清理
+    def _pick(self, decision: str) -> None:
+        log.debug("PermissionSelect._pick  decision=%s", decision)
+        self.post_message(self.Decided(self, self._tool_use_id, decision))
+
+class PermissionBlock(Static):
+    """日志里的权限审批摘要"""
+
+    _LABEL_MAP: dict[str, str] = {
+        "allow_once":       "allowed (once)",
+        "always_allow":     "always allowed",
+        "deny_once":        "denied",
+        "always_deny":      "always denied",
+        "timeout":          "⏱ timed out",
+    }
+    LABEL_MAP = _LABEL_MAP
+
+    # 子类提交消息：用户作出权限决策时发布
+    class Resolved(Message):
+        def __init__(self, block: PermissionBlock, decision: str):
+            self.block = block
+            self.decision = decision
+            super().__init__()
+
+    # 初始化审批块，记录工具 ID、名称和参数预览
+    def __init__(self, tool_use_id: str, tool_name: str, param_preview: str) -> None:
+        self._tool_use_id = tool_use_id
+        self._tool_name = tool_name
+        self._param_preview = param_preview
+        self._resolved = False
+        super().__init__(self._pending_text(), classes="log-line")
+
+
+    def _pending_text(self) -> str:
+        preview = f" [dim]{self._param_preview}[/]" if self._param_preview else ""
+        return f"[bold red]? permission[/][bold]{self._tool_name}[/]{preview}"
+
+    # 将块收缩为单行摘要并发布 Resolved 消息
+    def _resolve(self, decision: str) -> None:
+        if self._resolved:
+            return
+
+        self._resolved = True
+        allowed = decision in ("allow_once", "always_allow")
+        icon = "[bold green]✓[/]" if allowed else "[bold red]✗[/]"
+        label = self._LABEL_MAP.get(decision, decision)
+        preview = f"[dim]{self._param_preview}[/]" if self._param_preview else ""
+        self.update(
+            f"{icon} permission [bold]{self._tool_name}[/]{preview} [dim]{label}[/]"
+        )
+        self.post_message(self.Resolved(self, decision))
+
+
+
+
 class ChatTextArea(TextArea):
     DEFAULT_CSS = """
     ChatTextArea {
@@ -177,7 +338,7 @@ class FloRaTuiApp(App[None]):
     """FloRaClaude TUI：终端滚屏风格，实时展示 agent 执行过程。"""
     
     TITLE = "FloRaClaude TUI"
-    BINDINGS = [Binding("q", "quit", "Quit")]
+    BINDINGS = [Binding("ctrl+q", "quit", "Quit")]
 
     CSS = """
     Screen { background: $background; }
@@ -210,6 +371,7 @@ class FloRaTuiApp(App[None]):
         self._client: SocketClient | None = None
         self._current_llm: LLMStreamBlock | None = None
         self._pending_tool_blocks: dict[str, ToolCallBlock] = {}
+        self._pending_permission_blocks: dict[str, PermissionBlock] = {}
         self._session_id: str | None = None
         self._busy = False
     
@@ -226,6 +388,35 @@ class FloRaTuiApp(App[None]):
         prompt = self.query_one("#prompt", ChatTextArea)
         prompt.disabled = True
         prompt.border_title = "connecting..."
+
+    # 记录按键焦点；当 PermissionSelect 失去焦点后作为兜底处理权限快捷键
+    def on_key(self, event: events.Key) -> None:
+        log.debug("App.on_key  key=%r  focused=%r", event.key, self.focused)
+        if not self._pending_permission_blocks:
+            return
+        try:
+            select = self.query_one(PermissionSelect)
+            if select is None:
+                return
+            key = event.key
+            decision = PermissionSelect._KEY_MAP.get(key)
+            if decision:
+                event.stop()
+                select._pick(decision)
+            elif key in ("up", "k"):
+                event.stop()
+                select._cursor = (select._cursor - 1) % len(PermissionSelect._CHOICES)
+                select.update(select._render_ui())
+            elif key in ("down", "j"):
+                event.stop()
+                select._cursor = (select._cursor + 1) % len(PermissionSelect._CHOICES)
+                select.update(select._render_ui())
+            elif key == "enter":
+                event.stop()
+                select._pick(PermissionSelect._CHOICES[select._cursor][0])
+        except Exception:
+            pass
+        
 
     # 退出前尽全力关闭 session,失败也不阻塞 TUI 退出
     async def action_quit(self) -> None:
@@ -257,22 +448,63 @@ class FloRaTuiApp(App[None]):
         prompt.border_title = "agent is working..."
         self._append(Static(f"[bold]>[/] {content}", classes="user-turn"))
         self._update_header("running")
+        self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+    
+    # 在 worker 中执行 IPC 发送，使 App 在 agent 运行期间仍能处理消息
+    async def _do_send_message(self, content: str):
+        if self._client is None:
+            return
 
         try:
             await self._client.send_command(
                 "session.send_message",
                 {"content": content, "session_id": self._session_id}
             )
-        except IpcError as e:
-            self._busy = False
-            prompt.disabled = False
-            prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
-            self._update_header("ready")
-            self._append(Static(f"[red]send error: {e} [/]", classes="log-line"))
 
+        except (IpcError, RuntimeError, OSError) as e:
+            self._busy = False
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = False
+                prompt.read_only = False
+                prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+            self._update_header("ready")
+            self._append(Static(f"[red]send error: {e}[/red]", classes="log-line"))
+
+
+    # 处理内联审批控件的用户决策：发送 IPC 响应并恢复输入框
+    async def on_permission_select_decided(self, msg: PermissionSelect.Decided) -> None:
+        tool_use_id = msg.tool_use_id
+        decision = msg.decision
+        log.info("permission decided tool_use_id=%s decision=%s", tool_use_id, decision)
+        try:
+            msg.widget.remove()
+            perm_block = self._pending_permission_blocks.pop(tool_use_id, None)
+            if perm_block is not None:
+                perm_block._resolve(decision)
+
+            if self._client is not None:
+                try:
+                    await self._client.send_command(
+                        "permission.respond",
+                        {"tool_use_id": tool_use_id, "decision": decision}
+                    )
+                except (IpcError, RuntimeError, OSError):
+                    pass
+
+            if not self._pending_permission_blocks:
+                p = self._prompt()
+                if p is not None:
+                    p.disabled = False
+                    p.read_only = False
+                    p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                    p.focus()
+        except Exception:
+            log.exception("on_permission_select_decided failed tool_use_id=%s", tool_use_id)
+        
 
     def _append(self, widget: Widget):
-        log_view = self.query_one("#log-view")
+        log_view = self.query_one("#log-view", VerticalScroll)
         log_view.mount(widget)
         log_view.scroll_end(animate=False)
 
@@ -282,6 +514,11 @@ class FloRaTuiApp(App[None]):
         if self._current_llm is not None:
             self._current_llm.finalize_markdown()
         self._current_llm = None
+
+    # 将选择控件挂载到 Screen 顶层（#prompt 之前），避免 VerticalScroll 争抢焦点
+    def _mount_permission_select(self, select: PermissionSelect):
+        self.mount(select, before="#prompt")
+    
 
     def _prompt(self) -> ChatTextArea | None:
         try:
@@ -334,6 +571,11 @@ class FloRaTuiApp(App[None]):
             client.on_event(on_event)
         
             try:
+                loop_task.add_done_callback(
+                    lambda t: log.error("loop_task failed: %s", t.exception())
+                    if not t.cancelled() and t.exception() is not None
+                    else None        
+                )
                 params: dict[str, Any] = {
                     "topics": [
                         "session.*",
@@ -342,7 +584,8 @@ class FloRaTuiApp(App[None]):
                         "tool.*",
                         "llm.token", 
                         "llm.usage",
-                        "log.*"
+                        "log.*",
+                        "permission.*",
                     ],
                     "scope": "global",
                 }
@@ -378,8 +621,16 @@ class FloRaTuiApp(App[None]):
             
             self._update_header("disconnected")
             await asyncio.sleep(2)
-            
+
+    # 根据事件 type 路由到对应渲染逻辑；捕获异常防止 socket loop 因单个事件崩溃
     def _handle_event(self, event: dict[str, Any]) -> None:
+        try:
+            self._handle_event_inner(event)
+        except Exception:
+            log.exception("_handle_event crashed  event_type=%s", event.get("type", "?"))    
+
+    # 实际的事件路由逻辑
+    def _handle_event_inner(self, event: dict[str, Any]) -> None:
         t = event.get("type", "")
 
         if t == "llm.token":
@@ -470,6 +721,54 @@ class FloRaTuiApp(App[None]):
                 f"cache={event.get('cache_read_input_tokens')}[/dim]",
                 classes="usage",
             ))
+        elif t == "permission.requested":
+            tool_use_id = str(event.get("tool_use_id", ""))
+            tool_name = str(event.get("tool_name", ""))
+            param_preview = str(event.get("param_preview", ""))
+            try:
+                _focused_repr = repr(self.focused)
+            except Exception:
+                _focused_repr = "?"
+
+            log.info(
+                "permission.requested tool=%s id=%s  app.focused=%s",
+                tool_name, tool_use_id, _focused_repr,
+            )
+
+            perm_block = PermissionBlock(tool_use_id, tool_name, param_preview)
+            self._pending_permission_blocks[tool_use_id] = perm_block
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = True
+                prompt.border_title = "permission required"
+            self._append(perm_block)
+            select = PermissionSelect(tool_use_id)
+            self._mount_permission_select(select)
+            log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
+
+        elif t == "permission.denied":
+            # 处理超时或断连等非用户交互触发的 deny（用户主动 deny 已由 on_permission_select_decided 处理）
+            tool_use_id = str(event.get("tool_use_id", ""))
+            decision = str(event.get("decision", "denied"))
+            if tool_use_id in self._pending_permission_blocks:
+                perm_block = self._pending_permission_blocks.pop(tool_use_id, None)
+                if perm_block is not None:
+                    perm_block._resolve(decision)
+                try:
+                    select = self.query_one(PermissionSelect)
+                    select.remove()
+                except Exception:
+                    pass
+
+                # 如果没有工具调用了就恢复输入框
+                if not self._pending_permission_blocks:
+                    p = self._prompt()
+                    if p is not None:
+                        p.disabled = False
+                        p.read_only = False
+                        p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                        p.focus()
+
         elif t == "log.line":
             level = event.get("level", "INFO")
             color = "bold red" if level == "ERROR" else ("yellow" if level == "WARNING" else "dim")
