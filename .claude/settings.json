@@ -6,7 +6,16 @@
       "Bash(xxd)",
       "Bash(python3 -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")",
       "Bash(python -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")",
-      "Bash(python -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py', encoding='utf-8'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")"
+      "Bash(python -c \"compile\\(open\\(r'E:\\\\Work\\\\LLM_application\\\\FloRaClaude\\\\src\\\\flora_claude\\\\core\\\\config.py', encoding='utf-8'\\).read\\(\\), 'config.py', 'exec'\\); print\\('Syntax OK'\\)\")",
+      "Bash(env)",
+      "Bash(echo \"=== C:\\\\Users\\\\YUUMEI\\\\.flora ===\" && ls -la \"C:/Users/YUUMEI/.flora\" 2>/dev/null || echo \"\\(不存在\\)\" ; echo \"\" ; echo \"=== C:\\\\Users\\\\YUUMEI\\\\.kama ===\" && ls -la \"C:/Users/YUUMEI/.kama\" 2>/dev/null || echo \"\\(不存在\\)\")",
+      "Read(//c/Users/YUUMEI/.kama/**)",
+      "Bash(python -m pytest tests/unit/test_context_system_prompt.py -q)",
+      "Bash(python tests/unit/test_context_system_prompt.py)",
+      "Bash(python -c \"import ast,sys; ast.parse\\(open\\('src/flora_claude/core/compact/compactor.py',encoding='utf-8'\\).read\\(\\)\\); print\\('compactor.py OK, py', sys.version.split\\(\\)[0]\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/flora_claude/core/runner.py',encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('src/flora_claude/core/config.py',encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python -c \"from datetime import datetime, UTC; print\\(repr\\(datetime.now\\(UTC\\).strftime\\('%Y%m%d_%H%M%s'\\)\\)\\)\")",
+      "Bash(python -c \"from datetime import datetime, UTC; print\\(repr\\(datetime.now\\(UTC\\).strftime\\('%Y%m%d_%H%M%S'\\)\\)\\)\")"
     ]
   }
 }

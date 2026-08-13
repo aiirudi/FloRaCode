@@ -31,6 +31,8 @@ from flora_claude.core.bus.commands import (
     SessionGetHistoryResult,
     PermissionRespondCommand,
     PermissionRespondResult,
+    SessionCompactCommand,
+    SessionCompactResult,
 )
 
 from flora_claude.core.bus.envelope import EventPushEnvelope
@@ -46,6 +48,7 @@ from flora_claude.core.events.bus import EventBus
 from flora_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 from flora_claude.core.config import FloRaConfig,get_config
 from flora_claude.core.session import  SessionManager, SessionStore
+from flora_claude.core.llm.provider import AnthropicProvider
 
 
 logger = logging.getLogger(__name__)
@@ -140,6 +143,13 @@ class CoreApp:
         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
         return PermissionRespondResult()
 
+    # 手动压缩指定 session 的 thread.jsonl 并将状态摘要持久化保存到 thread.jsonl
+    async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
+        assert self._sessions is not None
+        cmd = SessionCompactCommand.model_validate(params)
+        result = self._sessions.compact(cmd.session_id, cmd.focus)
+        return result # type: ignore[no-any-return]
+
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str,Any]) -> SessionCloseResult:
         assert self._sessions is not None
@@ -224,10 +234,13 @@ class CoreApp:
         self._bus.subscribe(self._broadcaster.handle)
         sessions_root = Path("~/.flora/sessions").expanduser()
         store = SessionStore(sessions_root)
+        assert self._config is not None
+        compact_provider = AnthropicProvider(self._config.llm.default_model)
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(self._config, bus=self._bus, trace=self._trace, permission_manager=self._permission_manager),
-            bus=self._bus
+            bus=self._bus,
+            provider=compact_provider,
         )
 
         server = SocketServer(self._config.host, self._config.port, self._broadcaster, self._trace)
@@ -239,6 +252,7 @@ class CoreApp:
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
+        server.register("session.compact", self._session_compact_handler)
 
         addr = await server.start()
         logger.info("flora-core %s listening addr=%s", flora_claude.__version__, addr)

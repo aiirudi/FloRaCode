@@ -16,3 +16,4 @@ uv.lock
 .DS_Store
 *.log
 开发文档/
+workspace/

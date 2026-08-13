@@ -10,6 +10,7 @@ class UsageStats:
     output_tokens: int
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    context_pct: float = 0.0
 
 # 表示模型请求一个工具调用
 @dataclass

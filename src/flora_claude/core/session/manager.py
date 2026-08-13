@@ -6,16 +6,19 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from flora_claude.core.session.model import Session,SessionMode, SessionStatus
+from flora_claude.core.session.model import Session,SessionMode
 from flora_claude.core.session.store import SessionStore
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from flora_claude.core.runner import AgentRunner
 from flora_claude.core.events.bus import EventBus
 from flora_claude.core.bus.events import SessionCreatedEvent, SessionResumedEvent, SessionMessageReceivedEvent, SessionClosedEvent, SessionWaitingForInputEvent
 from flora_claude.core.bus.envelope import HandlerError
 from flora_claude.core.runs import new_run_id
+
+if TYPE_CHECKING:
+    from flora_claude.core.runner import AgentRunner
+    from flora_claude.core.llm.base import LLMProvider
+
 
 def _now():
     return datetime.now(UTC).isoformat()
@@ -31,13 +34,15 @@ class SessionManager:
         store: SessionStore,
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
+        provider: LLMProvider | None = None,
     ):
         self._runner_factory = runner_factory
         self._store = store
         self._bus = bus
         self._sessions: dict[str, Session] = {}
         # session 锁，一个session 只会被同一个进程同时拥有
-        self._lock: dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._provider = provider
 
 
     # 创建新 session 并写入 meta.json
@@ -54,7 +59,7 @@ class SessionManager:
             run_ids=[],
         )
         self._sessions[sid] = session
-        self._lock[sid] = asyncio.Lock()
+        self._locks[sid] = asyncio.Lock()
         self._store.write_meta(session)
         await self._bus.publish(
             SessionCreatedEvent(session_id=sid, mode=mode, ts=ts)
@@ -64,7 +69,7 @@ class SessionManager:
     # 处理用户消息，追加一次 thread 并启动一次 agent run
     async def send_message(self, sid: str, content: str, *, run_id: str | None = None) -> str:
         session = self._get_session(sid)
-        lock = self._lock[sid]
+        lock = self._locks[sid]
 
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
@@ -120,7 +125,7 @@ class SessionManager:
     # 关闭指定 session 并更新meta.json
     async def close(self, sid: str) -> None:
         session = self._get_session(sid)
-        lock = self._lock[sid]
+        lock = self._locks[sid]
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
 
@@ -134,6 +139,34 @@ class SessionManager:
                 )
             )
             
+    # 手动压缩指定 session 的 thread.jsonl, 将状态摘要持久化写入 thread.jsonl
+    async def compact(self, sid: str, focus: str = "") -> Any:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if self._provider is None:
+            raise HandlerError(-32020, "provider not available for compaction")
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+
+        async with lock:
+            from flora_claude.core.bus.commands import SessionCompactResult
+            from flora_claude.core.compact.compactor import Compactor
+
+            messages = self._store.read_messages(sid)
+            session_dir = self._store.session_dir(sid)
+            compactor = Compactor(self._bus, session_dir, sid)
+            result = await compactor.compact_messages(messages, self._provider, focus)
+            if result is None:
+                raise HandlerError(-32021, "compaction failed or not beneficial")
+
+            self._store.write_compacted(sid,[
+                {"role": "user", "content": result.summary_text},
+                {"role": "assistant", "content": "Understood, I'll continue from this summary."}
+            ])
+            return SessionCompactResult(
+                summary_tokens=result.summary_tokens,
+                saved_tokens=max(0, result.original_token_estimate - result.summary_tokens)
+            )
 
     # 读取指定session 的 thread 历史
     async def get_history(self, sid: str) -> list[dict[str, Any]]:
