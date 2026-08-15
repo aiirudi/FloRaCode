@@ -15,6 +15,7 @@ from flora_claude.core.bus.events import SessionCreatedEvent, SessionResumedEven
 from flora_claude.core.bus.envelope import HandlerError
 from flora_claude.core.runs import new_run_id
 
+
 if TYPE_CHECKING:
     from flora_claude.core.runner import AgentRunner
     from flora_claude.core.llm.base import LLMProvider
@@ -161,7 +162,7 @@ class SessionManager:
 
             self._store.write_compacted(sid,[
                 {"role": "user", "content": result.summary_text},
-                {"role": "assistant", "content": "Understood, I'll continue from this summary."}
+                {"role": "assistant", "content": "Understood, I'll continue from this summary."},
             ])
             return SessionCompactResult(
                 summary_tokens=result.summary_tokens,

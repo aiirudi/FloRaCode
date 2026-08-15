@@ -15,7 +15,9 @@
       "Bash(python -c \"import ast,sys; ast.parse\\(open\\('src/flora_claude/core/compact/compactor.py',encoding='utf-8'\\).read\\(\\)\\); print\\('compactor.py OK, py', sys.version.split\\(\\)[0]\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/flora_claude/core/runner.py',encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('src/flora_claude/core/config.py',encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
       "Bash(python -c \"from datetime import datetime, UTC; print\\(repr\\(datetime.now\\(UTC\\).strftime\\('%Y%m%d_%H%M%s'\\)\\)\\)\")",
-      "Bash(python -c \"from datetime import datetime, UTC; print\\(repr\\(datetime.now\\(UTC\\).strftime\\('%Y%m%d_%H%M%S'\\)\\)\\)\")"
+      "Bash(python -c \"from datetime import datetime, UTC; print\\(repr\\(datetime.now\\(UTC\\).strftime\\('%Y%m%d_%H%M%S'\\)\\)\\)\")",
+      "Read(//c/Users/YUUMEI/AppData/Roaming/uv/python/cpython-3.12-windows-x86_64-none/Lib/asyncio/**)",
+      "Read(//c/Users/YUUMEI/AppData/Roaming/uv/python/cpython-3.12.13-windows-x86_64-none/Lib/asyncio/**)"
     ]
   }
 }

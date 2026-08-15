@@ -147,7 +147,7 @@ class CoreApp:
     async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
         assert self._sessions is not None
         cmd = SessionCompactCommand.model_validate(params)
-        result = self._sessions.compact(cmd.session_id, cmd.focus)
+        result = await self._sessions.compact(cmd.session_id, cmd.focus)
         return result # type: ignore[no-any-return]
 
     # 关闭 session 并返回 closed 状态

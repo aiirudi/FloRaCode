@@ -281,7 +281,7 @@ class PermissionBlock(Static):
         allowed = decision in ("allow_once", "always_allow")
         icon = "[bold green]✓[/]" if allowed else "[bold red]✗[/]"
         label = self._LABEL_MAP.get(decision, decision)
-        preview = f"[dim]{self._param_preview}[/]" if self._param_preview else ""
+        preview = f" [dim]{self._param_preview}[/]" if self._param_preview else ""
         self.update(
             f"{icon} permission [bold]{self._tool_name}[/]{preview} [dim]{label}[/]"
         )
@@ -374,6 +374,7 @@ class FloRaTuiApp(App[None]):
         self._pending_permission_blocks: dict[str, PermissionBlock] = {}
         self._session_id: str | None = None
         self._busy = False
+        self._last_context_pct: float = 0.0
     
     # 构建 UI： 顶部状态栏目 + 可滚动日志事件
     def compose(self) -> ComposeResult:
@@ -431,9 +432,16 @@ class FloRaTuiApp(App[None]):
         self.exit()
 
 
+    # 将输入框提交内容发送给当前 chat session；用 worker 发送，避免 await 阻塞 App 消息泵
     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         content = event.value.strip()
         if not content:
+            return
+
+        if content == "/compact":
+            event.text_area.text = ""
+            if self._client is not None and self._session_id is not None and not self._busy:
+                self.run_worker(self._do_compact(), name="compact", exclusive=False)
             return
 
         if self._client is None or self._session_id is None or self._busy:
@@ -449,6 +457,30 @@ class FloRaTuiApp(App[None]):
         self._append(Static(f"[bold]>[/] {content}", classes="user-turn"))
         self._update_header("running")
         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+
+    # 在 worker 中执行手动压缩命令，完成后显示结果横幅
+    async def _do_compact(self) -> None:
+        if self._client is None or self._session_id is None:
+            return
+
+        self._append(Static("[dim]⚡ compacting context...[/dim]", classes="log-line"))
+        try:
+            result = await self._client.send_command(
+                "session.compact",
+                {"session_id": self._session_id, "focus": ""}
+            )
+            summary_tokens = int(result.get("summary_tokens", 0))
+            saved_tokens = int(result.get("saved_tokens", 0))
+            self._last_context_pct = 0.0
+            self._append(Static(
+                f"[bold cyan]⚡ Context compacted[/bold cyan]"
+                f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
+                classes="log-line",
+            ))
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+        
+    
     
     # 在 worker 中执行 IPC 发送，使 App 在 agent 运行期间仍能处理消息
     async def _do_send_message(self, content: str):
@@ -526,6 +558,19 @@ class FloRaTuiApp(App[None]):
         except NoMatches:
             return None
 
+    # 生成 context 占用率的彩色进度条字符串
+    def _render_ctx_bar(self, pct: float) -> str:
+        filled = int(pct * 20)
+        bar = "█" * filled + "░" * (20 - filled)
+        label = f"ctx:{pct*100:.1f}%"
+        if pct >= 0.85:
+            color = "bold red"
+        elif pct >= 0.7:
+            color = "yellow"
+        else:
+            color = "dim"
+        return f"[{color}]{label} {bar} [/]"
+
     # 根据连接和运行状态刷新顶部标题
     def _update_header(self, state: str) -> None:
         try:
@@ -586,6 +631,7 @@ class FloRaTuiApp(App[None]):
                         "llm.usage",
                         "log.*",
                         "permission.*",
+                        "context.*",
                     ],
                     "scope": "global",
                 }
@@ -714,12 +760,25 @@ class FloRaTuiApp(App[None]):
                     classes="run-err",
                 ))
         elif t == "llm.usage":
+            pct = float(event.get("context_pct") or 0.0)
+            self._last_context_pct = pct
+            ctx_bar = self._render_ctx_bar(pct)
             self._append(Static(
                 f"[dim]  tokens  "
                 f"in={event.get('input_tokens')} "
                 f"out={event.get('output_tokens')} "
-                f"cache={event.get('cache_read_input_tokens')}[/dim]",
+                f"cache={event.get('cache_read_input_tokens')}[/dim]"
+                f"  {ctx_bar}",
                 classes="usage",
+            ))
+        elif t == "context.compacted":
+            original_tokens = int(event.get("original_tokens", 0))
+            summary_tokens = int(event.get("summary_tokens", 0))
+            self._last_context_pct = 0.0
+            self._append(Static(
+                "[bold cyan]⚡ Context compacted[/]"
+                f"  [dim]original≈{original_tokens} tokens -> summary={summary_tokens} tokens[/]",
+                classes="log-line"
             ))
         elif t == "permission.requested":
             tool_use_id = str(event.get("tool_use_id", ""))
