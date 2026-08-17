@@ -134,17 +134,24 @@ class AnthropicProvider:
         ))
 
         tools_calls: list[ToolCallBlock] = []
+        thinking_blocks: list[dict[str, object]] = []
         for block in final_message.content:
             if block.type == "tool_use":
                 tools_calls.append(
                     ToolCallBlock(id=block.id, name=block.name,
                     input=dict(block.input))
                 )
+            elif block.type == "thinking":
+                # thinking blocks must be passed back verbatim in subsequent requests
+                thinking_blocks.append({
+                    "type": "thinking", "thinking": block.thinking, "signature": block.signature
+                })
         
         return LlmResponse(
             stop_reason=final_message.stop_reason or "end_turn",
             tool_calls=tools_calls,
             text="".join(text_parts),
+            thinking_blocks=thinking_blocks,
             usage=UsageStats(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,

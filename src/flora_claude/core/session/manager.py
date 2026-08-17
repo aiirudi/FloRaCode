@@ -11,10 +11,10 @@ from flora_claude.core.session.store import SessionStore
 from typing import TYPE_CHECKING
 
 from flora_claude.core.events.bus import EventBus
-from flora_claude.core.bus.events import SessionCreatedEvent, SessionResumedEvent, SessionMessageReceivedEvent, SessionClosedEvent, SessionWaitingForInputEvent
+from flora_claude.core.bus.events import SessionCreatedEvent, SessionResumedEvent, SessionMessageReceivedEvent, SessionClosedEvent, SessionWaitingForInputEvent, SkillInvokedEvent
 from flora_claude.core.bus.envelope import HandlerError
 from flora_claude.core.runs import new_run_id
-
+from flora_claude.core.skills.loader import SkillLoader
 
 if TYPE_CHECKING:
     from flora_claude.core.runner import AgentRunner
@@ -44,6 +44,7 @@ class SessionManager:
         # session 锁，一个session 只会被同一个进程同时拥有
         self._locks: dict[str, asyncio.Lock] = {}
         self._provider = provider
+        self._skill_loader = SkillLoader()
 
 
     # 创建新 session 并写入 meta.json
@@ -99,25 +100,48 @@ class SessionManager:
             session.updated_at = _now()
             self._store.write_meta(session)
 
+            # Skill 解析：检测 "/"前缀，展开为系统提示覆盖和工具白名单
+            goal = content
+            system_prompt_override: str | None = None
+            tool_whitelist: list[str] | None = None
+            if content.startswith("/"):
+                parts = content[1:].split(None, 1)
+                skill_name, arguments = parts[0], parts[1] if len(parts) > 1 else ""
+                skill = self._skill_loader.resolve(skill_name)
+                if skill is not None:
+                    goal = self._skill_loader.render_prompt(skill, arguments)
+                    system_prompt_override = skill.system_prompt_template
+                    tool_whitelist = skill.allowed_tools or None
+                    await self._bus.publish(
+                        SkillInvokedEvent(
+                            skill_name=skill_name,
+                            arguments=arguments,
+                            run_id=run_id,
+                            ts=_now(),
+                        )
+                    )
+
             runner = self._runner_factory()
             await runner.run_and_capture(
-                content,
+                goal,
                 run_id=run_id,
                 session=session,
-                store=self._store
+                store=self._store,
+                system_prompt_override=system_prompt_override,
+                tool_whitelist=tool_whitelist,
             )
 
             session.updated_at = _now()
             if session.mode == "one_shot":
                 session.status = "closed"
                 await self._bus.publish(
-                    SessionClosedEvent(session_id=sid, ts=_now())
+                    SessionClosedEvent(session_id=sid, ts=session.updated_at)
                 )
             else:
                 session.status = "waiting_for_input"
                 await self._bus.publish(
                     SessionWaitingForInputEvent(
-                        session_id=sid, last_run_id=run_id, ts=_now()
+                        session_id=sid, last_run_id=run_id, ts=session.updated_at
                     )
                 )
             self._store.write_meta(session)
@@ -129,7 +153,7 @@ class SessionManager:
         lock = self._locks[sid]
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
-
+        
         async with lock:
             session.status = "closed"
             session.updated_at = _now()
@@ -146,9 +170,10 @@ class SessionManager:
         lock = self._locks[sid]
         if self._provider is None:
             raise HandlerError(-32020, "provider not available for compaction")
+
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
-
+        
         async with lock:
             from flora_claude.core.bus.commands import SessionCompactResult
             from flora_claude.core.compact.compactor import Compactor

@@ -49,7 +49,7 @@ from flora_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
 from flora_claude.core.config import FloRaConfig,get_config
 from flora_claude.core.session import  SessionManager, SessionStore
 from flora_claude.core.llm.provider import AnthropicProvider
-
+from flora_claude.core.mcp.server import McpServerManager
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ class CoreApp:
         self._running_runs: set[asyncio.Task[None]] = set()
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
+        self._mcp_manager: McpServerManager | None = None
 
         
     
@@ -236,9 +237,16 @@ class CoreApp:
         store = SessionStore(sessions_root)
         assert self._config is not None
         compact_provider = AnthropicProvider(self._config.llm.default_model)
+
+        self._mcp_manager = McpServerManager()
+        if self._config.mcp.servers:
+            logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
+            await self._mcp_manager.start_all(self._config.mcp.servers)
+
+
         self._sessions = SessionManager(
             store,
-            runner_factory=lambda: AgentRunner(self._config, bus=self._bus, trace=self._trace, permission_manager=self._permission_manager),
+            runner_factory=lambda: AgentRunner(self._config, bus=self._bus, trace=self._trace, permission_manager=self._permission_manager, mcp_manager=self._mcp_manager),
             bus=self._bus,
             provider=compact_provider,
         )
@@ -276,7 +284,9 @@ class CoreApp:
             task.cancel()
         if self._running_runs:
             await asyncio.gather(*self._running_runs, return_exceptions=True)
-        await server.stop()
+        if self._mcp_manager is not None:
+            await self._mcp_manager.stop_all()
+        await server.stop() 
         if self._trace is not None:
             await self._trace.stop()
 

@@ -11,7 +11,7 @@ from flora_claude.core.bus.envelope import JsonRpcRequest
 
 type EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
-_MAX_LINE_BYTES = 1 * 1024 * 1024 # 1MB per frame
+_MAX_LINE_BYTES = 64 * 1024 * 1024 # 1MB per frame
 
 class IpcError(RuntimeError):
     def __init__(self, code: int, message: str) -> None:
@@ -71,6 +71,9 @@ class SocketClient:
                     line = await self._reader.readline()
                 except (ConnectionResetError, OSError):
                     break
+                except (ValueError, asyncio.LimitOverrunError):
+                    # 单行超出 limit；丢弃本行，继续读取后续消息
+                    continue
                     
                 if not line:
                     break
