@@ -6,7 +6,7 @@
 
 | 依赖 | 版本 |
 |------|------|
-| 操作系统 | macOS / Linux |
+| 操作系统 | macOS / Linux / Windows|
 | Python | 3.12.x |
 | [uv](https://docs.astral.sh/uv/) | ≥ 0.4 |
 
