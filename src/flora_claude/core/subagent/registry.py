@@ -11,7 +11,7 @@ class BackgroundTaskRegistry:
         self._tasks: dict[str, tuple[asyncio.Task[None], ExecutionContext]] = {}
 
     # 注册一个后台任务及其执行上下文
-    def registry(self, run_id: str,task: asyncio.Task[None], context: ExecutionContext) -> None:
+    def register(self, run_id: str,task: asyncio.Task[None], context: ExecutionContext) -> None:
         self._tasks[run_id] = (task, context)
 
     # 查询后台任务及其上下文；不存在时返回 None

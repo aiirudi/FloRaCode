@@ -40,7 +40,7 @@ class SpawnAgentParams(BaseModel):
     model_config = ConfigDict(extra="ignore")
     description: str
     prompt: str
-    run_id_background: bool = False
+    run_in_background: bool = False
     subagent_type: str = ""
 
 # 在隔离的冷启动上下文中派生子 agent，支持前台阻塞和后台并行两种模式
@@ -132,6 +132,216 @@ class SpawnAgentTool(BaseTool):
             await self._parent_bus.publish(event)
 
         child_bus.subscribe(_bridge)
+
+        child_registry = self._build_child_registry(child_bus, child_run_id, profile)
+        child_loop = AgentLoop(
+            self._provider,
+            child_registry,
+            child_bus,
+            permission_manager=self._permission_manager,
+            session_id=self._session_id,
+        )
+
+        await self._parent_bus.publish(
+            SubagentStartedEvent(
+                run_id=child_run_id,
+                parent_run_id=self._parent_run_id,
+                description=p.description,
+                ts=_now()
+            )
+        )
+
+        child_run_path = self._runs_dir / child_run_id
+        child_run_path.mkdir(parents=True, exist_ok=True)
+
+        if p.run_in_background:
+            task: asyncio.Task[None] = asyncio.create_task(
+                self._run_background(
+                    child_loop,
+                    child_context,
+                    child_bus,
+                    child_run_id,
+                    child_run_path,
+                )
+            )
+
+            self._task_registry.register(
+                child_run_id, task, child_context,
+            )
+
+            return ToolResult(
+                content=(
+                    f"Subagent started in background. run_id={child_run_id}. "
+                    f"Use agent_result(run_id='{child_run_id}') to retrieve result."
+                )
+            )
+
+        async with EventWriter(child_run_path / "events.jsonl") as writer:
+            writer.subscribe(child_bus)
+            await child_loop.run(child_context)
+
+        await self._parent_bus.publish(
+            SubagentFinishedEvent(
+                run_id=child_run_id,
+                parent_run_id=self._parent_run_id,
+                status=child_context.status,
+                ts=_now(),
+            )
+        )
+
+        if child_context.status == "success":
+            return ToolResult(
+                content=child_context.result or "Subagent completed with no text output."
+            )
+
+        return ToolResult(
+            content=(
+                child_context.result
+                or f"Subagent failed (status={child_context.status}, reason={child_context.reason})"
+            ),
+            is_error=True,
+            error_type="runtime_error",
+        )
+
+
+    # 后台任务协程：写事件文件，运行 loop，发布完成事件
+    async def _run_background(
+        self,
+        loop: AgentLoop,
+        context: ExecutionContext,
+        bus: EventBus,
+        run_id: str,
+        run_path: Path,
+    ):
+        async with EventWriter(run_path / "events.jsonl") as writer:
+            writer.subscribe(bus)
+            await loop.run(context)
+        await self._parent_bus.publish(
+            SubagentFinishedEvent(
+                run_id=run_id,
+                parent_run_id=self._parent_run_id,
+                status=context.status,
+                ts=_now()
+            )
+        )
+
+
+    # 构造子 registry；基于角色配置过滤工具，深度允许时注册嵌套 SpawnAgentTool
+    def _build_child_registry(
+        self,
+        child_bus: EventBus,
+        child_run_id: str,
+        profile: AgentProfile | None,
+    ) -> ToolRegistry:
+        from flora_claude.core.task.manager import TaskManager
+
+        allowed: set[str] = (
+            set(profile.allowed_tools) if profile and profile.allowed_tools else None
+        )
+
+        def _allowed(name: str) -> bool:
+            return allowed is None or name in allowed
+
+        registry = ToolRegistry()
+        _all_tools = [
+            BashTool(),
+            WriteFileTool(),
+            ListDirTool(),
+            ReadFileTool(),
+        ]
+
+        for t in _all_tools:
+            if _allowed(t.name):
+                registry.register(t)
+
+        child_task_manager = TaskManager(self._runs_dir / child_run_id / ".tasks")
+        for t in [
+            TaskCreateTool(child_task_manager),
+            TaskGetTool(child_task_manager),
+            TaskListTool(child_task_manager),
+            TaskUpdateTool(child_task_manager),
+        ]:
+            if _allowed(t.name):
+                registry.register(t)
+
         
+        if self._depth < 1:
+            nested = SpawnAgentTool(
+                provider=self._provider,
+                parent_bus=child_bus,
+                parent_run_id=child_run_id,
+                permission_manager=self._permission_manager,
+                max_steps=self._max_steps,
+                task_registry=self._task_registry,
+                runs_dir=self._runs_dir,
+                session_id=self._session_id,
+                depth=self._depth + 1,
+            )
+
+            if _allowed("spawn_agent"):
+                registry.register(nested)
+            if _allowed("agent_result"):
+                registry.register(AgentResultTool(self._task_registry))
+        return registry
+
+class AgentResultParams(BaseModel):
+    run_id: str
+
+# 查询后台 subagent 的执行状态和最终结果
+class AgentResultTool(BaseTool):
+    name = "agent_result"
+    description = (
+        "Retrieve the result of a background sub-agent previously started with spawn_agent. "
+        "Returns 'still running' if the sub-agent has not yet completed."
+    )
+    input_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "run_id": {
+                "type": "string",
+                "description": "The run_id returned by spawn_agent(run_in_background=true)",
+            },
+        },
+        "required": ["run_id"],
+    }
+    params_model = AgentResultParams
+
+    def __init__(self, task_registry: BackgroundTaskRegistry):
+        self._task_registry = task_registry
+
+    async def invoke(self, params: dict[str, object]) -> ToolResult:
+        p =  AgentResultParams.model_validate(params)
+        entry = self._task_registry.get(p.run_id)
+        if entry is None:
+            return ToolResult(
+                content=f"Unknown run_id: {p.run_id}. Only background subagents can be queried.",
+                is_error=True,
+                error_type="runtime_error",
+            )
+
+        task, context = entry
+        if not task.done():
+            return ToolResult(
+                content="still running"
+            )
+        if task.cancelled():
+            return ToolResult(
+                content="Subagent was cancelled.",
+                is_error=True,
+                error_type="runtime_error",
+            )
+
+        exc = task.exception()
+        if exc is not None:
+            return ToolResult(
+                content=f"Subagent raised an exception: {exc}",
+                is_error=True,
+                error_type="runtime_error",
+            )
+        return ToolResult(
+            content=context.result or "Subagent completed with no text result."
+        )
+
+
         
         
