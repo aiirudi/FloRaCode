@@ -65,7 +65,6 @@ class Compactor:
         self._session_dir = session_dir
         self._session_id = session_id
 
-
     async def compact(
         self,
         context: ExecutionContext,
@@ -182,3 +181,4 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
                     )
             parts.append(f"[{role}]\n" +'\n'.join(blocks))
     return "\n\n".join(parts)
+

@@ -53,6 +53,20 @@ class CompactionConfig:
 
 
 @dataclass
+class McpServerConfig:
+    name: str
+    transport: str = "stdio" # "stdio" | "tcp"
+    command: str = "" # stdio 专用：可执行文件路径
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    host: str = "localhost" #tcp 专用
+    port: int = 3000 #tcp专用
+
+@dataclass
+class McpConfig:
+    servers: list[McpServerConfig] = field(default_factory=list)
+
+@dataclass
 class FloRaConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
@@ -62,7 +76,7 @@ class FloRaConfig:
     trace: TraceConfig = field(default_factory=TraceConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
-
+    mcp: McpConfig = field(default_factory=McpConfig)
 
 
 # 构建并返回运行时配置: 默认值 -> TOML -> .env -> 系统环境变量 (后者优先级最高)
@@ -71,23 +85,29 @@ def get_config() -> FloRaConfig:
     config = FloRaConfig()  
 
     load_dotenv(".env", override=False)
+    explicit = os.environ.get("FLORA_CONFIG")
+    if explicit:
+        config_paths = [Path(explicit).expanduser()]
+    else:
+        config_paths = [
+            Path(_DEFAULT_CONFIG_PATH).expanduser(),
+            Path(".flora/config.toml"),
+        ]
 
-    config_path = Path(os.environ.get("FLORA_CONFIG", _DEFAULT_CONFIG_PATH)).expanduser()
-
-    if config_path.exists():
-        try:
-            with open(config_path, "rb") as f:
-                data = tomllib.load(f)
-        except tomllib.TOMLDecodeError as e:
-            raise SystemExit(f"Config parse error ({config_path}): {e}") from e
-
-        _apply_toml(config, data)
+    for config_path in config_paths:
+        if config_path.exists(): 
+            try:
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                raise SystemExit(f"Config parse error ({config_path}): {e}") from e
+            _apply_toml(config, data)
     _apply_env(config)
     return config
 
 
 def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -226,6 +246,57 @@ def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, int) or val <= 0:
                 raise SystemExit("Config error: compaction.tool_result_keep must be a positive integer")
             config.compaction.tool_result_keep = val
+
+    if "mcp" in data:
+        mcp = data["mcp"]
+        if not isinstance(mcp, dict):
+            raise SystemExit("Config error: [mcp] must be a table")
+        unknown_mcp: set[str] = set(mcp.keys()) - {"servers"}
+        if unknown_mcp:
+            raise SystemExit(f"Unknown [mcp] keys: {",".join(sorted(unknown_mcp))}")
+        servers_raw = mcp.get("servers", [])
+        if not isinstance(servers_raw, list):
+            raise SystemExit("Config error: mcp.servers must be an array of tables")
+
+        for i, srv in enumerate(servers_raw):
+            if not isinstance(srv, dict):
+                raise SystemExit(f"Config error: mcp.servers[{i}] must be a table")
+            name = srv.get("name")
+            if not isinstance(name, str) or not name:
+                raise SystemExit(f"Config error: mcp.servers[{i}].name must be a non-empty string")
+            transport = srv.get("transport", "stdio")
+            if transport not in ("stdio", "tcp"):
+                raise SystemExit(f"Config error: mcp.servers[{i}].tranport must be 'stdio' or 'tcp'")
+            s = McpServerConfig(name=name, transport=transport)
+            if "command" in srv:
+                val = srv["command"]
+                if not isinstance(val, str):
+                    raise SystemExit(f"Config error: mcp.servers[{i}].command must be a string")
+                s.command = val
+            if "args" in srv:
+                val = srv["args"]
+                if not isinstance(val, list):
+                    raise SystemExit(f"Config error: mcp.servers[{i}].args must be an arry")
+                s.args = [str(a) for a in val]
+            if "env" in srv:
+                val = srv["env"]
+                if not isinstance(val, dict):
+                    raise SystemExit(f"Config error: mcp.servers[{i}].env must be a table")
+                s.env = {str(k): str(v) for k, v in val.items()}
+
+            if "host" in srv:
+                val = srv["host"]
+                if not isinstance(val, str):
+                    raise SystemExit(f"Config error: mcp.servers[{i}].host must be a string")
+                s.host = val
+
+            if "port" in srv:
+                val = srv["port"]
+                if not isinstance(val, int):
+                    raise SystemExit(f"Config error: mcp.servers[{i}].port must be an integer")
+                s.port = val
+            config.mcp.servers.append(s)    
+
 
 def _apply_env(config: FloRaConfig) -> None:
     host = os.environ.get("FLORA_HOST")
