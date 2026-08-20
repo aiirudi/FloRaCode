@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import logging
 import asyncio
 import json
@@ -17,6 +18,7 @@ from textual.css.query import NoMatches
 
 from flora_claude.core.config import FloRaConfig
 from flora_claude.core.transport.socket_client import IpcError, SocketClient
+from flora_claude.core.skills.loader import SkillLoader
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +188,7 @@ class PermissionSelect(Static):
         )
         self.app.call_after_refresh(self._log_deferred_focus)
 
+
     # 在下一帧记录焦点是否真正转移到本控件
     def _log_deferred_focus(self) -> None:
         log.debug(
@@ -287,7 +290,86 @@ class PermissionBlock(Static):
         )
         self.post_message(self.Resolved(self, decision))
 
+class SlashCompleteWidget(Static):
+    """斜杠命令自动补全弹出框：输入 / 时显示可用 skill 列表并支持键盘筛选与选择。"""
 
+    can_focus = False
+
+    DEFAULT_CSS = """
+    SlashCompleteWidget {
+        height: auto;
+        padding: 0 1;
+        margin: 0 2;
+        background: $surface;
+        border: round $surface-lighten-2;
+    }
+    """
+
+    class Selected(Message):
+        # 初始化，携带被选中的 skill 名称，并作为事件消息向上传送
+        def __init__(self, skill_name: str) -> None:
+            self.skill_name = skill_name
+            super().__init__()
+
+    # 初始化，接收全量 (name, description) 列表
+    def __init__(self, items: list[tuple[str, str]]) -> None:
+        super().__init__("")
+        self._all_items = items
+        self._filtered: list[tuple[str, str]] = list(items)
+        self._cursor = 0
+
+    # 根据查询字符串筛选列表，重置光标并重新渲染
+    def set_query(self, query: str) -> None:
+        q = query.lower()
+        self._filtered = [(n, d) for n, d in self._all_items if not q or q in n.lower()]
+        self._cursor = min(self._cursor, max(0, len(self._filtered) - 1))
+        if self.is_attached:
+            self._redraw()
+
+    # 向上移动光标并重新渲染
+    def move_up(self) -> None:
+        if self._filtered:
+            self._cursor = (self._cursor - 1) % len(self._filtered)
+            self._redraw()
+
+    # 向下移动光标并重新渲染
+    def move_down(self) -> None:
+        if self._filtered:
+            self._cursor = (self._cursor + 1) % len(self._filtered)
+            self._redraw()
+
+    # 选中当前光标项并发布 Selected 消息
+    def select_current(self) -> None:
+        if self._filtered:
+            self.post_message(self.Selected(
+                self._filtered[self._cursor][0]
+            ))
+
+    # 返回当前是否有可选项
+    def has_selection(self):
+        return len(self._filtered) > 0
+
+    def on_mount(self) -> None:
+        self._redraw()
+
+    # 渲染筛选后的命令列表，高亮当前光标项
+    def _redraw(self) -> None:
+        if not self._filtered:
+            self.update("[dim]  no matching commands[/dim]")
+            return
+        lines: list[str] = []
+        for i, (name, desc) in enumerate(self._filtered):
+            desc_part = f"[dim]{desc}[/]" if desc else ""
+            if i == self._cursor:
+                lines.append(
+                    f"  [bold cyan]❯ /{name}[/bold cyan]{desc_part}"
+                )
+            else:
+                lines.append(
+                    f"  [cyan]/{name}[/]{desc_part}"
+                )
+        lines.append("[dim]  ↑↓ navigate   tab/enter select   esc dismiss[/dim]")
+        self.update("\n".join(lines))
 
 
 class ChatTextArea(TextArea):
@@ -307,6 +389,7 @@ class ChatTextArea(TextArea):
         background: $background;
     }
     """
+    
 
     # 子类自定义的提交消息，供宿主 App 监听
     class Submitted(Message):
@@ -315,21 +398,70 @@ class ChatTextArea(TextArea):
             self.value = area.text
             super().__init__()
 
-    # Enter 提交；Cmd/Shift/Alt+Enter 插入换行；其余键交回 TextArea 默认行为
+    # 输入内容以 / 开头且无空格时发布，query 为 / 之后的字符串（可为空串）；None 表示收起弹窗
+    class SlashChanged(Message):
+        def __init__(self, query: str | None) -> None:
+            self.query = query
+            super().__init__()
+
+    # 文本变化时检测 / 前缀，通知宿主 App 更新自动补全弹窗
+    def on_text_area_changed(self, event: TextArea.Changed):
+        text = self.text
+        if text.startswith("/") and " " not in text:
+            self.post_message(ChatTextArea.SlashChanged(query=text[1:]))
+        else:
+            self.post_message(ChatTextArea.SlashChanged(query=None))
+
+
+    # Enter 提交；↑↓/Tab/Esc 路由到自动补全弹窗；Cmd/Shift/Alt+Enter 插入换行；其余键交回 TextArea
     async def _on_key(self, event: events.Key):
         key = event.key
+
+        popup: SlashCompleteWidget | None = None
+        try: 
+            popup = self.app.query_one(SlashCompleteWidget)
+        except NoMatches:
+            popup = None
+
+
         if key == "enter":
             event.stop()
             event.prevent_default()
+
+            if popup is not None and popup.has_selection():
+                popup.select_current()
+                return
             if self.text.strip():
                 self.post_message(self.Submitted(self))
             return
-        elif key in ("alt+enter", "shift+enter", "ctrl+j", "super+enter"):
+        if key in ("alt+enter", "shift+enter", "ctrl+j", "super+enter"):
             event.stop()        # 阻止向父类冒泡
             event.prevent_default()     # 阻止组件在接收到这个事件时候的固定操作
             if not self.read_only:
                 self.insert("\n")
             return 
+
+        if popup is not None:
+            if key == "up":
+                event.stop()
+                event.prevent_default()
+                popup.move_up()
+                return
+            elif key == "down":
+                event.stop()
+                event.prevent_default()
+                popup.move_down()
+                return
+            elif key == "tab":
+                event.stop()
+                event.prevent_default()
+                popup.select_current()
+                return
+            elif key == "escape":
+                event.stop()
+                event.prevent_default()
+                popup.post_message(ChatTextArea.SlashChanged(query=None))
+                return
         return await super()._on_key(event)
 
 
@@ -337,9 +469,10 @@ class ChatTextArea(TextArea):
 class FloRaTuiApp(App[None]):
     """FloRaClaude TUI：终端滚屏风格，实时展示 agent 执行过程。"""
     
-    TITLE = "FloRaClaude TUI"
-    BINDINGS = [Binding("ctrl+q", "quit", "Quit")]
-
+    TITLE = "FloRaClaude"
+    BINDINGS = [
+        Binding("ctrl+q", "quit", "quit"),
+    ]
     CSS = """
     Screen { background: $background; }
     #header {
@@ -353,6 +486,7 @@ class FloRaTuiApp(App[None]):
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
     }
+    #banner { padding: 1 2 0 2; }
     Static.user-turn { color: $text; padding: 1 2 0 2; }
     Static.run-header { color: $text-muted; padding: 1 2 0 2; }
     Static.step-divider { color: $text-muted; padding: 0 2; }
@@ -361,6 +495,16 @@ class FloRaTuiApp(App[None]):
     Static.usage { padding: 0 2; }
     Static.log-line { padding: 0 2; }
     """
+
+    _BANNER = (
+        "[bold cyan]██╗  ██╗ █████╗ ███╗   ███╗ █████╗  ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗[/bold cyan]\n"
+        "[bold cyan]██║ ██╔╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝[/bold cyan]\n"
+        "[bold cyan]█████╔╝ ███████║██╔████╔██║███████║██║     ██║     ███████║██║   ██║██║  ██║█████╗  [/bold cyan]\n"
+        "[bold cyan]██╔═██╗ ██╔══██║██║╚██╔╝██║██╔══██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"
+        "[bold cyan]██║  ██╗██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"
+        "[bold cyan]╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"
+        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
+    )
 
     # 初始化连参数和 token 缓冲区
     def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
@@ -375,6 +519,9 @@ class FloRaTuiApp(App[None]):
         self._session_id: str | None = None
         self._busy = False
         self._last_context_pct: float = 0.0
+        self._slash_items: list[tuple[str, str]] = []
+        self._subagent_run_ids: dict[str, str] = {} # child run_id -> description
+        self._subagent_start_times: dict[str, float] = {} # child run_id -> start time
     
     # 构建 UI： 顶部状态栏目 + 可滚动日志事件
     def compose(self) -> ComposeResult:
@@ -384,11 +531,57 @@ class FloRaTuiApp(App[None]):
     
     # 挂载后启动是 socket 连接 worker
     def on_mount(self) -> None:
+        self._slash_items = self._build_slash_items()
+        self._append(Static(self._BANNER, id="banner"))
         # run_worker 的作用类似于 socket_loop 函数的作用
         self.run_worker(self._socket_loop(), exclusive=True, name="socket")
         prompt = self.query_one("#prompt", ChatTextArea)
         prompt.disabled = True
         prompt.border_title = "connecting..."
+
+    # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
+    def _build_slash_items(self) -> list[tuple[str, str]]:
+        items = [("compact", "compress context window")]
+        try:
+            loader = SkillLoader()
+            for skill in loader.list_all_skills():
+                desc = skill.description.splitlines()[0] if skill.description else ""
+                if len(desc) > 60:
+                    desc = desc[:57] + "..."
+                items.append((skill.name, desc))
+            
+        except Exception:
+            pass
+
+        return items
+
+    def on_chat_text_area_slash_changed(self, event: ChatTextArea.SlashChanged) -> None:
+        query = event.query
+        if query is None:
+            try:
+                self.query_one(SlashCompleteWidget).remove()
+            except Exception:
+                pass
+            return
+
+        try:
+            popup = self.query_one(SlashCompleteWidget)
+            popup.set_query(query)
+        except Exception:
+            popup = SlashCompleteWidget(self._slash_items)
+            self.mount(popup, before="#prompt")
+            popup.set_query(query)
+
+    # 用户选中自动补全项后将 /{name} 填入输入框并移除弹窗
+    def on_slash_complete_widget_selected(self, event: SlashCompleteWidget.Selected):
+        prompt = self._prompt()
+        if prompt is not None:
+            prompt.text = f"/{event.skill_name} "
+            prompt.move_cursor(prompt.document.end)
+        try:
+            self.query_one(SlashCompleteWidget).remove()
+        except NoMatches:
+            pass
 
     # 记录按键焦点；当 PermissionSelect 失去焦点后作为兜底处理权限快捷键
     def on_key(self, event: events.Key) -> None:
@@ -397,7 +590,7 @@ class FloRaTuiApp(App[None]):
             return
         try:
             select = self.query_one(PermissionSelect)
-            if select is None:
+            if select.has_focus:
                 return
             key = event.key
             decision = PermissionSelect._KEY_MAP.get(key)
@@ -632,6 +825,8 @@ class FloRaTuiApp(App[None]):
                         "log.*",
                         "permission.*",
                         "context.*",
+                        "subagent.*",
+                        "skill.*",
                     ],
                     "scope": "global",
                 }
@@ -714,7 +909,50 @@ class FloRaTuiApp(App[None]):
                 classes="run-header",
             ))
 
+        elif t == "skill.invoked":
+            skill_name = event.get("skill_name", "")
+            arguments = event.get("arguments", "")
+            args_preview = _preview(arguments, 80) if arguments else ""
+            args_part = f"  [dim]{args_preview}[/dim]" if args_preview else ""
+            self._append(Static(
+                f"[bold cyan]/{skill_name}[/bold cyan]{args_part}",
+                classes="log-line",
+            ))
+
+        elif t == "subagent.started":
+            run_id = event.get("run_id", "")
+            description = event.get("description", "")
+            self._subagent_run_ids[run_id] = description
+            self._subagent_start_times[run_id] = time.monotonic()
+            short_id = run_id[:8] if len(run_id) >= 8 else run_id
+            self._append(Static(
+                f"[dim]┌─[/dim] [cyan]{_preview(description, 72)}[/cyan]  [dim]{short_id}[/dim]",
+                classes="log-line",
+            ))
+
+        elif t == "subagent.finished":
+            run_id = event.get("run_id", "")
+            status = event.get("status", "")
+            description = self._subagent_run_ids.pop(run_id, event.get("description", ""))
+            start = self._subagent_start_times.pop(run_id, None)
+            elapsed = f"  [dim]{time.monotonic() - start:.1f}s[/dim]" if start is not None else ""
+            desc_part = f"[cyan]{_preview(description, 72)}[/cyan]{elapsed}"
+            if status == "success":
+                self._append(Static(
+                    f"[dim]└─[/dim] [bold green]✓[/bold green] {desc_part}",
+                    classes="log-line",
+                ))
+            else:
+                self._append(Static(
+                    f"[dim]└─[/dim] [bold red]✗[/bold red] {desc_part}",
+                    classes="log-line",
+                ))
+
         elif t == "step.started":
+            run_id= event.get("run_id", "")
+            if run_id in self._subagent_run_ids:
+                return
+            
             step = event.get("step", "")
             self._append(Static(
                 f"[dim]step {step}[/dim]",
@@ -724,7 +962,10 @@ class FloRaTuiApp(App[None]):
             tool_use_id = str(event.get("tool_use_id", ""))
             tool_name = str(event.get("tool_name", ""))
             params = event.get("params") or {}
+            run_id = event.get("run_id", "")
             tc_block = ToolCallBlock(tool_name, params)
+            if run_id in self._subagent_run_ids:
+                tc_block.styles.padding = (0, 2, 0, 6)
             self._pending_tool_blocks[tool_use_id] = tc_block
             self._append(tc_block)
 
@@ -760,6 +1001,9 @@ class FloRaTuiApp(App[None]):
                     classes="run-err",
                 ))
         elif t == "llm.usage":
+            run_id = event.get("run_id", "")
+            if run_id in self._subagent_run_ids:
+                return
             pct = float(event.get("context_pct") or 0.0)
             self._last_context_pct = pct
             ctx_bar = self._render_ctx_bar(pct)
