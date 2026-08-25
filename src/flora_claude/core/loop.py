@@ -112,8 +112,7 @@ class AgentLoop:
                 context.mark_success()
             elif context.step >= context.max_steps:
                 context.mark_failed("exceeded_max_steps")
-
-
+            
             
             # 工具结果追加完毕（messages 末尾为 user）后检查压缩，仅在 run 继续时触发
             # 此时压缩结果 [user_summary, assistant_ack] 对下一次 LLM 调用是合法输入
