@@ -1,181 +1,64 @@
-"""Python 3.12 新特性 Demo
+# -*- coding: utf-8 -*-
+"""快速排序（Quick Sort）示例。
 
-涵盖以下 3.12 特性：
-  - PEP 701: 更灵活的 f-string（多行、反斜杠、相同引号复用）
-  - PEP 698: @override 显式覆写检查
-  - PEP 695: 紧凑泛型语法 type / class / def 均支持 [T]
-  - itertools.batched: 批量分组
-  - pathlib.Path.walk: 原生目录遍历
-  - typing.Self: 方法返回自身类型的正确标注
-  - 改进的错误信息: 更聪明的 NameError / ImportError
+快速排序是一种基于分治思想的排序算法：
+1. 从数组中选择一个基准值（pivot）；
+2. 通过一趟划分（partition），将数组分为两部分：
+   - 左边部分都小于等于基准值；
+   - 右边部分都大于基准值；
+3. 对左右两部分递归执行上述步骤，直到子数组长度为 0 或 1。
+
+平均时间复杂度：O(n log n)
+最坏时间复杂度：O(n^2)（例如每次划分都极不平衡时）
+空间复杂度：O(log n)（递归栈深度）
+稳定性：不稳定
 """
 
-from pathlib import Path
-from typing import Self, override
-from itertools import batched
+from typing import List, Optional, TypeVar
 
-# =============================================================================
-# 1. PEP 701 — 灵活的 f-string
-# =============================================================================
-print("═" * 50)
-print("1. PEP 701 — 灵活的 f-string")
-print("═" * 50)
-
-hero = "Arthur"
-weapon = "Excalibur"
-
-# 内嵌和外层相同引号不再冲突
-print(f"Sir {hero} shouted: "I am the king!"")
-print(f'Sir {hero} whispered: \'I am scared\'')
-
-# 表达式内部可以换行 + 注释
-print(
-    f"Verdict: {
-        'worthy'
-        if len(weapon) > 5   # 武器名够长就算配得上
-        else 'unworthy'
-    }"
-)
+T = TypeVar("T")
 
 
-# =============================================================================
-# 2. PEP 698 — @override
-# =============================================================================
-print("\n" + "═" * 50)
-print("2. PEP 698 — @override 显式覆写")
-print("═" * 50)
+def partition(arr: List[T], low: int, high: int) -> int:
+    """对 arr[low..high] 进行一次划分，返回基准值的最终位置。
+
+    采用 Lomuto 划分方案：选择最右侧元素作为基准值。
+    """
+    pivot = arr[high]      # 基准值
+    i = low - 1            # i 指向「小于等于 pivot 区域」的最后一个元素
+
+    for j in range(low, high):
+        if arr[j] <= pivot:
+            i += 1
+            arr[i], arr[j] = arr[j], arr[i]
+
+    # 将基准值放到正确位置
+    arr[i + 1], arr[high] = arr[high], arr[i + 1]
+    return i + 1
 
 
-class MusicPlayer:
-    def play(self) -> str:
-        return "♪ ♪ ♪"
+def quick_sort(arr: List[T], low: int = 0, high: Optional[int] = None) -> None:
+    """对数组 arr 在 [low, high] 区间内进行原地快速排序。"""
+    if high is None:
+        high = len(arr) - 1
 
-    def stop(self) -> str:
-        return "silence"
-
-
-class VinylPlayer(MusicPlayer):
-    @override
-    def play(self) -> str:
-        return "♫ crackle ♫"
-
-    @override
-    def stop(self) -> str:
-        return "needle lifted"
+    if low < high:
+        pivot_index = partition(arr, low, high)
+        quick_sort(arr, low, pivot_index - 1)
+        quick_sort(arr, pivot_index + 1, high)
 
 
-vp = VinylPlayer()
-print(f"play  → {vp.play()}")
-print(f"stop  → {vp.stop()}")
+if __name__ == "__main__":
+    test_cases = [
+        [3, 6, 8, 10, 1, 2, 1],
+        [5, 2, 9, 1, 7, 6, 3],
+        [],
+        [42],
+        [4, 4, 4, 4],
+        [9, 8, 7, 6, 5, 4, 3, 2, 1],
+    ]
 
-
-# =============================================================================
-# 3. PEP 695 — 紧凑泛型语法
-# =============================================================================
-print("\n" + "═" * 50)
-print("3. PEP 695 — type / class / def [T]")
-print("═" * 50)
-
-type Pair[T] = tuple[T, T]
-
-
-class Box[T]:
-    def __init__(self, value: T) -> None:
-        self.value = value
-
-
-def pick[T](a: T, b: T, *, left: bool = True) -> T:
-    return a if left else b
-
-
-p: Pair[str] = ("hello", "world")
-b = Box(42)
-chosen = pick("apple", "banana", left=False)
-
-print(f"Pair[str]    = {p}")
-print(f"Box[int]     = {b.value}")
-print(f"pick(…)      = {chosen}")
-
-
-# =============================================================================
-# 4. itertools.batched
-# =============================================================================
-print("\n" + "═" * 50)
-print("4. itertools.batched — 批量分组")
-print("═" * 50)
-
-nums = range(1, 21)
-for idx, chunk in enumerate(batched(nums, 6)):
-    print(f"  chunk {idx}: {list(chunk)}")
-
-# 最后一个 batch 自动变短
-short = list(batched("abcde", 2))
-print(f"  short batches: {short}")
-
-
-# =============================================================================
-# 5. pathlib.Path.walk
-# =============================================================================
-print("\n" + "═" * 50)
-print("5. pathlib.Path.walk — 目录遍历")
-print("═" * 50)
-
-cwd = Path(".")
-for dirpath, dirnames, filenames in cwd.walk():
-    depth = len(dirpath.relative_to(cwd).parts)
-    if depth > 1:
-        continue
-    prefix = "  " * depth
-    print(f"{prefix}{dirpath.name}/")
-    for f in sorted(filenames):
-        print(f"{prefix}  {f}")
-    if not filenames:
-        print(f"{prefix}  (empty)")
-
-
-# =============================================================================
-# 6. typing.Self — 返回自身类型
-# =============================================================================
-print("\n" + "═" * 50)
-print("6. typing.Self — 方法返回自身类型")
-print("═" * 50)
-
-
-class Counter:
-    def __init__(self, start: int = 0) -> None:
-        self.n = start
-
-    def inc(self) -> Self:
-        self.n += 1
-        return self
-
-    def dec(self) -> Self:
-        self.n -= 1
-        return self
-
-
-c = Counter().inc().inc().dec()
-print(f"Counter after inc().inc().dec() = {c.n}")
-
-
-# =============================================================================
-# 7. 更友好的错误信息
-# =============================================================================
-print("\n" + "═" * 50)
-print("7. 更友好的错误信息")
-print("═" * 50)
-
-import sys
-
-try:
-    from collections import ordereddict
-except ImportError as e:
-    print(f"  ImportError → {e}")
-
-try:
-    standard = 3.14
-    print(standart)
-except NameError as e:
-    print(f"  NameError  → {e}")
-
-print("\n✅ 所有 Demo 运行完毕 (Python {0}.{1})".format(*sys.version_info[:2]))
+    for data in test_cases:
+        arr = data[:]  # 复制一份，避免破坏原列表
+        quick_sort(arr)
+        print(f"{data} -> {arr}")

@@ -258,7 +258,7 @@ class AgentRunner:
 
         if session is not None and store is not None:
             store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
-
+        
         if cancelled:
             raise asyncio.CancelledError()
 
