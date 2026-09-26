@@ -74,3 +74,20 @@ def test_priority_chain_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     cfg = get_config()
 
     assert cfg.port == 8000
+
+
+def test_sandbox_config_toml_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text('[sandbox]\ndefault_mode = "read_only"\nimage = "python:3.12"\n', encoding="utf-8")
+    monkeypatch.setenv("FLORA_CONFIG", str(toml_path))
+    monkeypatch.delenv("FLORA_SANDBOX_DEFAULT_MODE", raising=False)
+    monkeypatch.delenv("FLORA_SANDBOX_IMAGE", raising=False)
+    cfg = get_config()
+    assert cfg.sandbox.default_mode == "read_only"
+    assert cfg.sandbox.image == "python:3.12"
+
+    monkeypatch.setenv("FLORA_SANDBOX_DEFAULT_MODE", "workspace_write")
+    monkeypatch.setenv("FLORA_SANDBOX_IMAGE", "custom:latest")
+    cfg = get_config()
+    assert cfg.sandbox.default_mode == "workspace_write"
+    assert cfg.sandbox.image == "custom:latest"

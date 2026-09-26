@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import sys
-import time
-import json
+import asyncio
 import datetime
 import fnmatch
+import json
 import logging
-import asyncio
 import signal
-
-from typing import Any
+import sys
+import time
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -20,54 +19,55 @@ from flora_claude.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
-    PongResult,
-    SessionCreateCommand,
-    SessionCreateResult,
-    SessionSendMessageCommand,
-    SessionSendMessageResult,
-    SessionCloseCommand,
-    SessionCloseResult,
-    SessionGetHistoryCommand,
-    SessionGetHistoryResult,
     PermissionRespondCommand,
     PermissionRespondResult,
+    PongResult,
+    SessionCloseCommand,
+    SessionCloseResult,
     SessionCompactCommand,
     SessionCompactResult,
+    SessionCreateCommand,
+    SessionCreateResult,
+    SessionGetHistoryCommand,
+    SessionGetHistoryResult,
+    SessionSendMessageCommand,
+    SessionSendMessageResult,
 )
-
 from flora_claude.core.bus.envelope import EventPushEnvelope
+from flora_claude.core.config import FloRaConfig, get_config
+from flora_claude.core.events.bus import EventBus
+from flora_claude.core.llm.provider import AnthropicProvider
 from flora_claude.core.logging_setup import setup_logging
+from flora_claude.core.mcp.server import McpServerManager
 from flora_claude.core.permissions.manager import PermissionManager
 from flora_claude.core.permissions.storage import load_policy_file
-from flora_claude.core.runs import events_file, new_run_id
 from flora_claude.core.runner import AgentRunner
-from flora_claude.core.transport.socket_server import SocketServer, get_connection_writer
+from flora_claude.core.runs import events_file, new_run_id
+from flora_claude.core.sandbox.runtime import SandboxPool
+from flora_claude.core.session import SessionManager, SessionStore
 from flora_claude.core.trace.record import TraceRecord
 from flora_claude.core.trace.writer import TraceWriter
-from flora_claude.core.events.bus import EventBus
 from flora_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
-from flora_claude.core.config import FloRaConfig,get_config
-from flora_claude.core.session import  SessionManager, SessionStore
-from flora_claude.core.llm.provider import AnthropicProvider
-from flora_claude.core.mcp.server import McpServerManager
+from flora_claude.core.transport.socket_server import SocketServer, get_connection_writer
 
 logger = logging.getLogger(__name__)
 
 
-def _now():
+def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 class CoreApp:
-    def __init__(self):
+    def __init__(self) -> None:
         self._start_time = time.monotonic()
         self._bus = EventBus()
         self._broadcaster: IpcEventBroadcaster | None = None
         self._config: FloRaConfig | None = None
         self._trace: TraceWriter | None = None
-        self._running_runs: set[asyncio.Task[None]] = set()
+        self._running_runs: set[asyncio.Task[str]] = set()
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
+        self._sandbox_pool: SandboxPool | None = None
 
         
     
@@ -99,26 +99,37 @@ class CoreApp:
     #启动一次 agent run：立即返回 run_id， 后台 task 执行 runner.run()
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
     
-        """
-        在 stage/s2 之前都还是限制并发的，一次只能有一个 agent 在运行。修改成现在这样之后接收所有的请求
-        """
+        """启动一次 agent run，并立即返回标识。"""
         assert self._sessions is not None
         cmd=AgentRunCommand.model_validate(params)
-        session = await self._sessions.create(mode="one_shot",title=cmd.goal[:40])
+        session = await self._sessions.create(
+            mode="one_shot", title=cmd.goal[:40],
+            workspace_root=cmd.workspace_root, sandbox_mode=cmd.sandbox_mode,
+        )
         run_id = new_run_id()
         run_task = asyncio.create_task(
             self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
         )
         self._running_runs.add(run_task)
         run_task.add_done_callback(self._running_runs.discard)
-        return AgentRunResult(run_id=run_id)
+        return AgentRunResult(
+            run_id=run_id,
+            workspace_root=session.workspace_root,
+            sandbox_mode=session.sandbox_mode,
+        )
 
     # 创建 chat 或者 one shot session 并返回 session id
     async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
         assert self._sessions is not None
         cmd = SessionCreateCommand.model_validate(params)
-        session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
-        return SessionCreateResult(session_id=session.id, status=session.status)
+        session = await self._sessions.create(
+            mode=cmd.mode, title=cmd.title,
+            workspace_root=cmd.workspace_root, sandbox_mode=cmd.sandbox_mode,
+        )
+        return SessionCreateResult(
+            session_id=session.id, status=session.status,
+            workspace_root=session.workspace_root, sandbox_mode=session.sandbox_mode,
+        )
 
     # 向 session 发送一条用户消息并同步等待对应 run 完成
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
@@ -137,7 +148,10 @@ class CoreApp:
     # 接收客户端权限审批响应，resolve 对应挂起的 Future
     async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
         cmd = PermissionRespondCommand.model_validate(params)
-        logger.info("permission.respond received tool_use_id=%s decision=%s", cmd.tool_use_id, cmd.decision)
+        logger.info(
+            "permission.respond received tool_use_id=%s decision=%s",
+            cmd.tool_use_id, cmd.decision,
+        )
         if self._permission_manager is None:
             logger.error("permission.respond: PermissionManager not initialized")
             return PermissionRespondResult()
@@ -236,19 +250,28 @@ class CoreApp:
         sessions_root = Path("~/.flora/sessions").expanduser()
         store = SessionStore(sessions_root)
         assert self._config is not None
-        compact_provider = AnthropicProvider(self._config.llm.default_model)
+        config = self._config
+        compact_provider = AnthropicProvider(config.llm.default_model)
 
         self._mcp_manager = McpServerManager()
         if self._config.mcp.servers:
             logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
             await self._mcp_manager.start_all(self._config.mcp.servers)
 
+        self._sandbox_pool = SandboxPool(config.sandbox.image)
 
         self._sessions = SessionManager(
             store,
-            runner_factory=lambda: AgentRunner(self._config, bus=self._bus, trace=self._trace, permission_manager=self._permission_manager, mcp_manager=self._mcp_manager),
+            runner_factory=lambda: AgentRunner(
+                config, bus=self._bus, trace=self._trace,
+                permission_manager=self._permission_manager,
+                mcp_manager=self._mcp_manager,
+                sandbox_pool=self._sandbox_pool,
+            ),
             bus=self._bus,
             provider=compact_provider,
+            default_sandbox_mode=config.sandbox.default_mode,
+            on_close=self._sandbox_pool.close,
         )
 
         server = SocketServer(self._config.host, self._config.port, self._broadcaster, self._trace)
@@ -286,6 +309,8 @@ class CoreApp:
             await asyncio.gather(*self._running_runs, return_exceptions=True)
         if self._mcp_manager is not None:
             await self._mcp_manager.stop_all()
+        if self._sandbox_pool is not None:
+            await self._sandbox_pool.close_all()
         await server.stop() 
         if self._trace is not None:
             await self._trace.stop()

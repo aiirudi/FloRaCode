@@ -4,9 +4,10 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 from dotenv import load_dotenv
+from flora_claude.core.session.model import SandboxMode
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7437
@@ -67,6 +68,11 @@ class McpConfig:
     servers: list[McpServerConfig] = field(default_factory=list)
 
 @dataclass
+class SandboxConfig:
+    default_mode: SandboxMode = "off"
+    image: str = "python:3.12-alpine"
+
+@dataclass
 class FloRaConfig:
     host: str = _DEFAULT_HOST
     port: int = _DEFAULT_PORT
@@ -77,6 +83,7 @@ class FloRaConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
 
 # 构建并返回运行时配置: 默认值 -> TOML -> .env -> 系统环境变量 (后者优先级最高)
@@ -107,7 +114,7 @@ def get_config() -> FloRaConfig:
 
 
 def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission", "compaction", "mcp", "sandbox"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -147,7 +154,7 @@ def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
         agent = data["agent"]
         if not isinstance(agent, dict):
             raise SystemExit("Config error: [agent] must be a table")
-        
+
         unknown_agent: set[str] = set(agent.keys()) -  {"max_steps"}
         if unknown_agent:
             raise SystemExit(f"Unknown [agent] keys: {', '.join(sorted(unknown_agent))}")
@@ -297,8 +304,38 @@ def _apply_toml(config: FloRaConfig, data: dict[str, Any]) -> None:
                 s.port = val
             config.mcp.servers.append(s)    
 
+    if "sandbox" in data:
+        sandbox = data["sandbox"]
+        if not isinstance(sandbox, dict):
+            raise SystemExit("Config error: [sandbox] must be a table")
+        unknown_sandbox = set(sandbox) - {"default_mode", "image"}
+        if unknown_sandbox:
+            raise SystemExit(f"Unknown [sandbox] keys: {', '.join(sorted(unknown_sandbox))}")
+        if "default_mode" in sandbox:
+            mode = sandbox["default_mode"]
+            if mode not in ("off", "read_only", "workspace_write"):
+                raise SystemExit("Config error: sandbox.default_mode must be off, read_only, or workspace_write")
+            config.sandbox.default_mode = mode
+        if "image" in sandbox:
+            image = sandbox["image"]
+            if not isinstance(image, str) or not image.strip():
+                raise SystemExit("Config error: sandbox.image must be a non-empty string")
+            config.sandbox.image = image
+
 
 def _apply_env(config: FloRaConfig) -> None:
+    sandbox_mode = os.environ.get("FLORA_SANDBOX_DEFAULT_MODE")
+    if sandbox_mode is not None:
+        if sandbox_mode not in ("off", "read_only", "workspace_write"):
+            raise SystemExit("Config error: FLORA_SANDBOX_DEFAULT_MODE must be off, read_only, or workspace_write")
+        config.sandbox.default_mode = cast(SandboxMode, sandbox_mode)
+
+    sandbox_image = os.environ.get("FLORA_SANDBOX_IMAGE")
+    if sandbox_image is not None:
+        if not sandbox_image.strip():
+            raise SystemExit("Config error: FLORA_SANDBOX_IMAGE must be a non-empty string")
+        config.sandbox.image = sandbox_image
+
     host = os.environ.get("FLORA_HOST")
     if host is not None:
         config.host = host
@@ -355,12 +392,12 @@ def _apply_env(config: FloRaConfig) -> None:
     permission_timeout = os.environ.get("FLORA_PERMISSION_TIMEOUT_S")
     if permission_timeout is not None:
         try:
-            val = float(permission_timeout)
-            if val < 0:
+            permission_timeout_val = float(permission_timeout)
+            if permission_timeout_val < 0:
                 raise SystemExit(
                     f"Config error: FLORA_PERMISSION_TIMEOUT_S must be >= 0, got: {permission_timeout!r}"
                 )
-            config.permission.timeout_s = val
+            config.permission.timeout_s = permission_timeout_val
         except ValueError:
             raise SystemExit(
                 f"Config error: FLORA_PERMISSION_TIMEOUT_S must be a number, got: {permission_timeout!r}"
@@ -410,4 +447,3 @@ def _apply_env(config: FloRaConfig) -> None:
             raise SystemExit(
                 f"Config error: FLORA_COMPACT_TOOL_KEEP must be an integer, got: {compact_tool_keep!r}"
             )
-        

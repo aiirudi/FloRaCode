@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import Any
 
 from flora_claude.core.config import FloRaConfig
@@ -78,10 +79,17 @@ async def _chat_async(config: FloRaConfig) -> int:
         )
         created = await client.send_command(
             "session.create",
-            {"mode": "chat"},
+            {
+                "mode": "chat",
+                "workspace_root": str(Path.cwd().resolve()),
+                "sandbox_mode": config.sandbox.default_mode,
+            },
         )
         session_id = str(created["session_id"])
         print(f"[session]: {session_id}")
+        active_root = created.get("workspace_root", str(Path.cwd().resolve()))
+        active_mode = created.get("sandbox_mode", config.sandbox.default_mode)
+        print(f"[workspace] {active_root}  sandbox={active_mode}")
 
         while True:
             try:

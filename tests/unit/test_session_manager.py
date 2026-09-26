@@ -7,7 +7,7 @@ import pytest
 from flora_claude.core.bus.envelope import HandlerError
 from flora_claude.core.events.bus import EventBus
 from flora_claude.core.runner import RunOutcome
-from flora_claude.core.session.manager import SESSION_CLOSED, SESSION_NOT_FOUND, SessionManager
+from flora_claude.core.session.manager import INVALID_WORKSPACE, SESSION_CLOSED, SESSION_NOT_FOUND, SessionManager
 from flora_claude.core.session.model import Session
 from flora_claude.core.session.store import SessionStore
 
@@ -21,6 +21,8 @@ class _Runner:
         run_id: str | None = None,
         session: Session | None = None,
         store: SessionStore | None = None,
+        system_prompt_override: str | None = None,
+        tool_whitelist: list[str] | None = None,
     ) -> RunOutcome:
         assert run_id is not None
         assert session is not None
@@ -102,3 +104,40 @@ async def test_closed_session_rejects_message(tmp_path: Path) -> None:
     with pytest.raises(HandlerError) as exc:
         await manager.send_message(session.id, "again")
     assert exc.value.code == SESSION_CLOSED
+
+
+async def test_sandbox_workspace_is_absolute_and_persisted(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    manager = SessionManager(store, lambda: _Runner(), EventBus(), default_sandbox_mode="read_only")  # type: ignore[arg-type]
+    with pytest.raises(HandlerError) as exc:
+        await manager.create("chat")
+    assert exc.value.code == INVALID_WORKSPACE
+    with pytest.raises(HandlerError) as exc:
+        await manager.create("chat", workspace_root="relative")
+    assert exc.value.code == INVALID_WORKSPACE
+
+    session = await manager.create("chat", workspace_root=str(tmp_path))
+    assert session.sandbox_mode == "read_only"
+    assert session.workspace_root == str(tmp_path.resolve())
+    assert store.read_meta(session.id).workspace_root == session.workspace_root
+
+
+async def test_one_shot_cleanup_even_when_runner_raises(tmp_path: Path) -> None:
+    closed: list[str] = []
+
+    async def on_close(sid: str) -> None:
+        closed.append(sid)
+
+    class FailingRunner:
+        async def run_and_capture(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("run failed")
+
+    store = SessionStore(tmp_path)
+    manager = SessionManager(store, lambda: FailingRunner(), EventBus(), on_close=on_close)  # type: ignore[arg-type]
+    session = await manager.create("one_shot")
+    with pytest.raises(RuntimeError, match="run failed"):
+        await manager.send_message(session.id, "hello")
+    assert store.read_meta(session.id).status == "closed"
+    assert closed == [session.id]
+    await manager.close(session.id)
+    assert closed == [session.id]

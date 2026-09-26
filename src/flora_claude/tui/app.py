@@ -1,24 +1,27 @@
 from __future__ import annotations
 
-import time
-import logging
 import asyncio
 import json
+import logging
+import time
+from pathlib import Path
 from typing import Any
 
 from rich.markdown import Markdown
+from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Label, Static, TextArea
-from textual.containers import VerticalScroll
-from textual.css.query import NoMatches
 
 from flora_claude.core.config import FloRaConfig
-from flora_claude.core.transport.socket_client import IpcError, SocketClient
 from flora_claude.core.skills.loader import SkillLoader
+from flora_claude.core.transport.socket_client import IpcError, SocketClient
+from flora_claude.tui.workspace_setup import WorkspaceSetupScreen
 
 log = logging.getLogger(__name__)
 
@@ -507,11 +510,14 @@ class FloRaTuiApp(App[None]):
     )
 
     # 初始化连参数和 token 缓冲区
-    def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
+    def __init__(self, host: str, port: int, replay_run_id: str | None = None,
+                 *, workspace_root: str | None = None, sandbox_mode: str = "off") -> None:
         super().__init__()
         self._host = host
         self._port = port
         self._replay_run_id = replay_run_id
+        self._workspace_root = workspace_root or str(Path.cwd().resolve())
+        self._sandbox_mode = sandbox_mode
         self._client: SocketClient | None = None
         self._current_llm: LLMStreamBlock | None = None
         self._pending_tool_blocks: dict[str, ToolCallBlock] = {}
@@ -529,22 +535,36 @@ class FloRaTuiApp(App[None]):
         yield VerticalScroll(id="log-view")
         yield ChatTextArea(id="prompt",show_line_numbers=False)
     
-    # 挂载后启动是 socket 连接 worker
+    # Select the workspace before connecting or creating a session.
     def on_mount(self) -> None:
-        self._slash_items = self._build_slash_items()
         self._append(Static(self._BANNER, id="banner"))
-        # run_worker 的作用类似于 socket_loop 函数的作用
-        self.run_worker(self._socket_loop(), exclusive=True, name="socket")
         prompt = self.query_one("#prompt", ChatTextArea)
         prompt.disabled = True
+        prompt.border_title = "choose a workspace to start"
+        self.push_screen(
+            WorkspaceSetupScreen(self._workspace_root, self._sandbox_mode),
+            self._workspace_selected,
+        )
+
+    def _workspace_selected(self, selection: tuple[str, str] | None) -> None:
+        if selection is None:
+            self.exit()
+            return
+        self._workspace_root, self._sandbox_mode = selection
+        self._slash_items = self._build_slash_items()
+        prompt = self.query_one("#prompt", ChatTextArea)
         prompt.border_title = "connecting..."
+        self._update_header("connecting")
+        self.run_worker(self._socket_loop(), exclusive=True, name="socket")
 
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
     def _build_slash_items(self) -> list[tuple[str, str]]:
         items = [("compact", "compress context window")]
         try:
             loader = SkillLoader()
-            for skill in loader.list_all_skills():
+            for skill in loader.list_all_skills(
+                Path(self._workspace_root), sandbox_mode=self._sandbox_mode
+            ):
                 desc = skill.description.splitlines()[0] if skill.description else ""
                 if len(desc) > 60:
                     desc = desc[:57] + "..."
@@ -780,7 +800,7 @@ class FloRaTuiApp(App[None]):
         }.get(state, "dim")
         header.update(
             f"[bold]FloRaClaude[/] [dim]{self._host}:{self._port}[/]"
-            f"{session} [{color}]{state}[/]"  
+            f"{session} [dim]sandbox:{escape(self._sandbox_mode)}[/] [{color}]{state}[/]"
         )
 
 
@@ -837,8 +857,16 @@ class FloRaTuiApp(App[None]):
 
                 created = await client.send_command(
                     "session.create", 
-                    {"mode":"chat"})
+                    {"mode": "chat", "workspace_root": self._workspace_root,
+                     "sandbox_mode": self._sandbox_mode})
                 self._session_id = str(created["session_id"])
+                self._workspace_root = str(created.get("workspace_root", self._workspace_root))
+                self._sandbox_mode = str(created.get("sandbox_mode", self._sandbox_mode))
+                self._append(Static(
+                    f"[dim]workspace:[/] {escape(self._workspace_root)}  "
+                    f"[dim]sandbox:[/] {escape(self._sandbox_mode)}",
+                    classes="log-line",
+                ))
                 prompt = self._prompt()
                 if prompt is not None:
                     prompt.disabled = False
@@ -1083,5 +1111,8 @@ class FloRaTuiApp(App[None]):
 
 
 def run(config: FloRaConfig, replay_run_id: str | None = None) -> None:
-    app = FloRaTuiApp(config.host, config.port, replay_run_id=replay_run_id)
+    app = FloRaTuiApp(
+        config.host, config.port, replay_run_id=replay_run_id,
+        workspace_root=str(Path.cwd().resolve()), sandbox_mode="off",
+    )
     app.run()

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from flora_claude.core.tools.base import ToolResult, BaseTool
+from flora_claude.core.tools.base import BaseTool, ToolResult
+
+if TYPE_CHECKING:
+    from flora_claude.core.sandbox.runtime import SandboxExecutor
 
 
 _MAX_DEPTH = 4
@@ -39,15 +43,29 @@ class ListDirTool(BaseTool):
         "required": [],
     }
 
+    def __init__(
+        self,
+        sandbox_executor: SandboxExecutor | None = None,
+        *,
+        workspace_root: Path | None = None,
+    ) -> None:
+        self._sandbox_executor = sandbox_executor
+        self._workspace_root = workspace_root
+
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = ListDirParams.model_validate(params)
         path_str = p.path
         max_depth = p.max_depth
 
+        if self._sandbox_executor is not None:
+            return await self._sandbox_executor.list_dir(path_str, max_depth)
+
         if ".." in Path(path_str).parts:
             raise PermissionError(f"path traversal not allowed: {path_str}")
 
         root = Path(path_str)
+        if self._workspace_root is not None and not root.is_absolute():
+            root = self._workspace_root / root
         if not root.exists():
             raise FileNotFoundError(f"no such directory: {path_str}")
         if not root.is_dir():
@@ -77,4 +95,3 @@ class ListDirTool(BaseTool):
 
         _walk(root, 1, "")
         return ToolResult(content="\n".join(lines))
-

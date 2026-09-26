@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from flora_claude.core.tools.base import ToolResult, BaseTool
+from flora_claude.core.tools.base import BaseTool, ToolResult
+
+if TYPE_CHECKING:
+    from flora_claude.core.sandbox.runtime import SandboxExecutor
 
 _MAX_OUTPUT_BYTES = 64 * 1024 # 64 KB
 _DEFAULT_TIMEOUT = 60
@@ -39,6 +44,15 @@ class BashTool(BaseTool):
         },
         "required": ["command"],
     }
+
+    def __init__(
+        self,
+        sandbox_executor: SandboxExecutor | None = None,
+        *,
+        workspace_root: Path | None = None,
+    ) -> None:
+        self._sandbox_executor = sandbox_executor
+        self._workspace_root = workspace_root
     
 
     # 在子进程中执行 shell 命令，合并 stdout/stderr，超时或非零退出码时返回错误
@@ -47,11 +61,15 @@ class BashTool(BaseTool):
         command = p.command
         timeout = p.timeout
 
+        if self._sandbox_executor is not None:
+            return await self._sandbox_executor.bash(command, timeout)
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=self._workspace_root,
             )
 
             try:
@@ -79,6 +97,6 @@ class BashTool(BaseTool):
             return ToolResult(
                 content=f"[exit {returncode}]\n{output}",
                 is_error=True,
-                error_type="runtime_error",
+                error_type="command_failed",
             )
         return ToolResult(content=output or "[no output]")

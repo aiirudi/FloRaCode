@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
+import argparse
 import logging
 import logging.handlers
-import argparse
+import os
 from pathlib import Path
 
 from flora_claude.core.config import get_config
@@ -40,7 +40,10 @@ def main() -> None:
 
     config = get_config()
     _setup_logging(config.logging.level)
-    app = FloRaTuiApp(config.host, config.port, replay_run_id=args.replay)
+    app = FloRaTuiApp(
+        config.host, config.port, replay_run_id=args.replay,
+        workspace_root=str(Path.cwd().resolve()), sandbox_mode="off",
+    )
     app.run()
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal, Annotated, Any
 from pydantic import BaseModel, Discriminator
 
-from flora_claude.core.session import SessionStatus, SessionMode
+from flora_claude.core.session import SessionStatus, SessionMode, SandboxMode
 
 class PingCommand(BaseModel):
     type: Literal["core.ping"] = "core.ping"
@@ -17,9 +17,13 @@ class PongResult(BaseModel):
 class AgentRunCommand(BaseModel):
     type: Literal["agent.run"] = "agent.run"
     goal: str
+    workspace_root: str | None = None
+    sandbox_mode: SandboxMode | None = None
 
 class AgentRunResult(BaseModel):
     run_id: str
+    workspace_root: str
+    sandbox_mode: SandboxMode
 
 class EventSubscribeCommand(BaseModel):
     type: Literal['event.subscribe'] = "event.subscribe"
@@ -35,10 +39,14 @@ class SessionCreateCommand(BaseModel):
     type: Literal["session.create"] = "session.create"
     mode: SessionMode = "chat"
     title: str = ""
+    workspace_root: str | None = None
+    sandbox_mode: SandboxMode | None = None
 
 class SessionCreateResult(BaseModel):
     session_id: str
     status: SessionStatus
+    workspace_root: str
+    sandbox_mode: SandboxMode
 
 class SessionSendMessageCommand(BaseModel):
     type: Literal["session.send_message"] = "session.send_message" 

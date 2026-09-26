@@ -1,43 +1,44 @@
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from dataclasses import dataclass
 
 from flora_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
+from flora_claude.core.compact.compactor import Compactor
 from flora_claude.core.config import FloRaConfig
 from flora_claude.core.context import ExecutionContext
 from flora_claude.core.events.bus import EventBus, EventHandler
 from flora_claude.core.events.writer import EventWriter
 from flora_claude.core.llm.base import LLMProvider
 from flora_claude.core.llm.provider import AnthropicProvider
-from flora_claude.core.compact.compactor import Compactor
 from flora_claude.core.loop import AgentLoop
 from flora_claude.core.mcp.server import McpServerManager
-from flora_claude.core.subagent.registry import BackgroundTaskRegistry
 from flora_claude.core.memory.loader import load_context_file
+from flora_claude.core.permissions.manager import PermissionManager
+from flora_claude.core.runs import RUNS_DIR, new_run_id
+from flora_claude.core.sandbox.runtime import SandboxExecutor, SandboxPool
+from flora_claude.core.session.model import Session
+from flora_claude.core.session.store import SessionStore
+from flora_claude.core.subagent.registry import BackgroundTaskRegistry
+from flora_claude.core.subagent.tool import AgentResultTool, SpawnAgentTool
 from flora_claude.core.task.manager import TaskManager
 from flora_claude.core.tools.builtin import (
     BashTool,
     ListDirTool,
+    NoteSaveTool,
     ReadFileTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
     TaskUpdateTool,
     WriteFileTool,
-    NoteSaveTool
 )
-from flora_claude.core.runs import RUNS_DIR, new_run_id
 from flora_claude.core.tools.registry import ToolRegistry
-from flora_claude.core.trace.writer import TraceWriter
 from flora_claude.core.trace.provider import TraceProvider
-from flora_claude.core.session.model import Session
-from flora_claude.core.session.store import SessionStore
-from flora_claude.core.permissions.manager import PermissionManager
-from flora_claude.core.subagent.tool import SpawnAgentTool, AgentResultTool
+from flora_claude.core.trace.writer import TraceWriter
 
 
 def _now() -> str:
@@ -62,6 +63,7 @@ class AgentRunner:
         trace: TraceWriter | None = None,
         permission_manager: PermissionManager | None = None,
         mcp_manager: McpServerManager | None = None,
+        sandbox_pool: SandboxPool | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
@@ -71,6 +73,7 @@ class AgentRunner:
         self._trace = trace
         self._permission_manager = permission_manager
         self._mcp_manager = mcp_manager
+        self._sandbox_pool = sandbox_pool
         self._task_registry = BackgroundTaskRegistry()
 
     # 构建工具注册表，注入 TaskManager（任务工具共享同一实例）；可选注入 SpawnAgentTool
@@ -85,7 +88,8 @@ class AgentRunner:
             bus: EventBus | None = None,
             child_runs_dir: Path | None = None,
             session_id: str = "",
-            tool_whitelist: list[str] | None = None
+            tool_whitelist: list[str] | None = None,
+            sandbox_executor: SandboxExecutor | None = None,
         ) -> ToolRegistry:
         allowed: set[str] | None = set(tool_whitelist) if tool_whitelist else None
 
@@ -93,9 +97,16 @@ class AgentRunner:
             return allowed is None or name in allowed
 
         registry = ToolRegistry()
+        host_workspace_root = (
+            Path(session.workspace_root)
+            if session is not None and session.sandbox_mode == "off" else None
+        )
 
         for t in [
-            ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool(),
+            ReadFileTool(sandbox_executor, workspace_root=host_workspace_root),
+            BashTool(sandbox_executor, workspace_root=host_workspace_root),
+            WriteFileTool(sandbox_executor, workspace_root=host_workspace_root),
+            ListDirTool(sandbox_executor, workspace_root=host_workspace_root),
         ]:
             if _ok(t.name):
                 registry.register(t)
@@ -128,6 +139,8 @@ class AgentRunner:
                         runs_dir=runs_dir,
                         session_id=session_id,
                         depth=0,
+                        sandbox_executor=sandbox_executor,
+                        host_workspace_root=host_workspace_root,
                     )
                 )
 
@@ -138,7 +151,7 @@ class AgentRunner:
                     )
                 )
 
-        if self._mcp_manager is not None:
+        if self._mcp_manager is not None and (session is None or session.sandbox_mode == "off"):
             for mcp_tool in self._mcp_manager.get_tools():
                 if _ok(mcp_tool.name):
                     registry.register(mcp_tool)
@@ -173,7 +186,20 @@ class AgentRunner:
         run_path.mkdir(parents=True, exist_ok=True)
 
         gloabl_ctx = load_context_file(Path("~/.flora/context.md").expanduser())
-        project_ctx = load_context_file(Path(".flora/context.md").expanduser())
+        workspace_root = Path(session.workspace_root) if session is not None else Path.cwd()
+        project_ctx_candidate = workspace_root / ".flora" / "context.md"
+        project_ctx_path: Path | None = project_ctx_candidate
+        if session is not None and session.sandbox_mode != "off":
+            try:
+                if not project_ctx_candidate.resolve().is_relative_to(workspace_root.resolve()):
+                    logging.getLogger(__name__).warning(
+                        "ignore project context outside sandbox workspace session_id=%s",
+                        session.id,
+                    )
+                    project_ctx_path = None
+            except (OSError, RuntimeError):
+                project_ctx_path = None
+        project_ctx = load_context_file(project_ctx_path) if project_ctx_path else ""
 
         task_manager = TaskManager(run_path / ".tasks")
 
@@ -194,6 +220,19 @@ class AgentRunner:
         )
         prefill_len = len(history)
 
+        sandbox_executor: SandboxExecutor | None = None
+        own_executor = False
+        if session is not None and session.sandbox_mode != "off":
+            if self._sandbox_pool is None:
+                sandbox_executor = SandboxExecutor(
+                    workspace_root, session.sandbox_mode, self._config.sandbox.image
+                )
+                own_executor = True
+            else:
+                sandbox_executor = self._sandbox_pool.get(
+                    session.id, workspace_root, session.sandbox_mode
+                )
+
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
@@ -207,7 +246,10 @@ class AgentRunner:
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload
                     )
-                session_dir = store.session_dir(session.id) if session is not None and store is not None else run_path
+                session_dir = (
+                    store.session_dir(session.id)
+                    if session is not None and store is not None else run_path
+                )
                 session_id_str = session.id if session is not None else ""
                 child_runs_dir = (
                     store.runs_dir(session.id) if session is not None and store is not None
@@ -224,6 +266,7 @@ class AgentRunner:
                     child_runs_dir=child_runs_dir,
                     session_id=session_id_str,
                     tool_whitelist=tool_whitelist,
+                    sandbox_executor=sandbox_executor,
                 )
                 compactor = Compactor(bus, session_dir, session_id_str)
                 loop = AgentLoop(
@@ -245,6 +288,9 @@ class AgentRunner:
                 )
                 if not context.is_done():
                     context.mark_failed("llm_error")
+            finally:
+                if own_executor and sandbox_executor is not None:
+                    await sandbox_executor.close()
 
             await bus.publish(
                 RunFinishedEvent(

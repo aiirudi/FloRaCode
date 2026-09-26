@@ -108,6 +108,8 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `type` | `string` | no |
 | `goal` | `string` | yes |
+| `workspace_root` | `string | null` | no |
+| `sandbox_mode` | `string | null` | no |
 
 ```json
 {
@@ -121,6 +123,35 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "goal": {
       "title": "Goal",
       "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
+    },
+    "sandbox_mode": {
+      "anyOf": [
+        {
+          "enum": [
+            "off",
+            "read_only",
+            "workspace_write"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sandbox Mode"
     }
   },
   "required": [
@@ -139,7 +170,9 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "id": "u-2",
   "method": "agent.run",
   "params": {
-    "goal": "\u603b\u7ed3 README.md \u7684\u4e3b\u8981\u7ae0\u8282"
+    "goal": "\u603b\u7ed3 README.md \u7684\u4e3b\u8981\u7ae0\u8282",
+    "workspace_root": "/home/user/project",
+    "sandbox_mode": "read_only"
   }
 }
 ```
@@ -149,6 +182,8 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | Field | Type | Required |
 |---|---|---|
 | `run_id` | `string` | yes |
+| `workspace_root` | `string` | yes |
+| `sandbox_mode` | `string` | yes |
 
 ```json
 {
@@ -156,10 +191,25 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
     "run_id": {
       "title": "Run Id",
       "type": "string"
+    },
+    "workspace_root": {
+      "title": "Workspace Root",
+      "type": "string"
+    },
+    "sandbox_mode": {
+      "enum": [
+        "off",
+        "read_only",
+        "workspace_write"
+      ],
+      "title": "Sandbox Mode",
+      "type": "string"
     }
   },
   "required": [
-    "run_id"
+    "run_id",
+    "workspace_root",
+    "sandbox_mode"
   ],
   "title": "AgentRunResult",
   "type": "object"
@@ -173,7 +223,9 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "jsonrpc": "2.0",
   "id": "u-2",
   "result": {
-    "run_id": "20260516-100000-abc123"
+    "run_id": "20260516-100000-abc123",
+    "workspace_root": "/home/user/project",
+    "sandbox_mode": "read_only"
   }
 }
 ```
@@ -297,6 +349,8 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 | `type` | `string` | no |
 | `mode` | `string` | no |
 | `title` | `string` | no |
+| `workspace_root` | `string | null` | no |
+| `sandbox_mode` | `string | null` | no |
 
 ```json
 {
@@ -320,6 +374,35 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       "default": "",
       "title": "Title",
       "type": "string"
+    },
+    "workspace_root": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspace Root"
+    },
+    "sandbox_mode": {
+      "anyOf": [
+        {
+          "enum": [
+            "off",
+            "read_only",
+            "workspace_write"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sandbox Mode"
     }
   },
   "title": "SessionCreateCommand",
@@ -336,7 +419,9 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "method": "session.create",
   "params": {
     "mode": "chat",
-    "title": ""
+    "title": "",
+    "workspace_root": "/home/user/project",
+    "sandbox_mode": "workspace_write"
   }
 }
 ```
@@ -347,6 +432,8 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
 |---|---|---|
 | `session_id` | `string` | yes |
 | `status` | `string` | yes |
+| `workspace_root` | `string` | yes |
+| `sandbox_mode` | `string` | yes |
 
 ```json
 {
@@ -363,11 +450,26 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
       ],
       "title": "Status",
       "type": "string"
+    },
+    "workspace_root": {
+      "title": "Workspace Root",
+      "type": "string"
+    },
+    "sandbox_mode": {
+      "enum": [
+        "off",
+        "read_only",
+        "workspace_write"
+      ],
+      "title": "Sandbox Mode",
+      "type": "string"
     }
   },
   "required": [
     "session_id",
-    "status"
+    "status",
+    "workspace_root",
+    "sandbox_mode"
   ],
   "title": "SessionCreateResult",
   "type": "object"
@@ -382,7 +484,9 @@ All commands are sent as JSON-RPC 2.0 requests. The `type` field inside `params`
   "id": "u-4",
   "result": {
     "session_id": "sess-abc123def456",
-    "status": "active"
+    "status": "active",
+    "workspace_root": "/home/user/project",
+    "sandbox_mode": "workspace_write"
   }
 }
 ```

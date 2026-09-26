@@ -3,24 +3,38 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time
+from pathlib import Path
 from typing import Any
-
-from pydantic import BaseModel
 
 from flora_claude.core.config import FloRaConfig
 from flora_claude.core.transport.socket_client import IpcError, SocketClient
 
-from flora_claude.core.bus.events import (
-    RunStartedEvent,
-    RunFinishedEvent,
-    StepStartedEvent,
-    StepFinishedEvent,
-    ToolCallStartedEvent,
-    ToolCallFailedEvent,
-    ToolCallFinishedEvent,
-    LlmTokenEvent,
-)
+_DECISION_MAP = {"y": "allow_once", "a": "always_allow", "n": "deny_once", "d": "always_deny"}
+
+
+async def _readline(prompt: str) -> str:
+    """Read terminal input without blocking the socket loop or shutdown."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[str] = loop.create_future()
+
+    def read() -> None:
+        try:
+            value = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            value = "n"
+        try:
+            def finish() -> None:
+                if not result.done():
+                    result.set_result(value)
+
+            loop.call_soon_threadsafe(finish)
+        except RuntimeError:
+            pass
+
+    threading.Thread(target=read, daemon=True).start()
+    return await result
 
 
 class StdoutPrinter:
@@ -71,11 +85,15 @@ class StdoutPrinter:
         
         elif type == "run.finished":
             self._ensure_newline()
-            elapsed = time.monotonic() - self._run_start            
-            print(f"[run] {event.get("status", "")}  {event.get("steps", "")} steps  {elapsed:.1f}s")
+            elapsed = time.monotonic() - self._run_start
+            print(
+                f"[run] {event.get('status', '')}  {event.get('steps', '')} "
+                f"steps  {elapsed:.1f}s"
+            )
 
 # 异步核心：连接 daemon, 订阅事件，触发run，等待 run.finished
 async def _run_async(goal: str, config: FloRaConfig) -> int:
+    workspace_root = str(Path.cwd().resolve())
     client = SocketClient(config.host, config.port)
     try:
         await client.connect()
@@ -86,9 +104,38 @@ async def _run_async(goal: str, config: FloRaConfig) -> int:
     printer = StdoutPrinter()
     finished = asyncio.Event()
     exit_code = 0
+    run_id: str | None = None
+    early_events: list[dict[str, Any]] = []
+    permission_tasks: set[asyncio.Task[None]] = set()
+
+    async def respond_to_permission(event: dict[str, Any]) -> None:
+        tool_use_id = str(event.get("tool_use_id", ""))
+        print(f"[permission] {event.get('tool_name', '')} {event.get('param_preview', '')}")
+        print("  y=allow once  a=always allow  n=deny once  d=always deny")
+        while True:
+            decision = _DECISION_MAP.get((await _readline("permission> ")).strip().lower())
+            if decision is not None:
+                break
+            print("enter y, a, n, or d")
+        try:
+            await client.send_command(
+                "permission.respond", {"tool_use_id": tool_use_id, "decision": decision}
+            )
+        except IpcError as exc:
+            print(f"error: {exc}", file=sys.stderr)
 
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal exit_code
+        if run_id is None:
+            early_events.append(event)
+            return
+        if event.get("run_id") != run_id:
+            return
+        if event.get("type") == "permission.requested":
+            task = asyncio.create_task(respond_to_permission(event))
+            permission_tasks.add(task)
+            task.add_done_callback(permission_tasks.discard)
+            return
         await printer.handle(event)
         if event.get("type") == "run.finished":
             if event.get("status") != "success":
@@ -102,17 +149,28 @@ async def _run_async(goal: str, config: FloRaConfig) -> int:
         await client.send_command(
             "event.subscribe",
             {
-                "topics": ["run.*", "step.*", "tool.*", "llm.token", "llm.usage"],
+                "topics": [
+                    "run.*", "step.*", "tool.*", "llm.token", "llm.usage",
+                    "permission.*",
+                ],
                 "scope": "global",
             }
         )
-        await client.send_command(
+        created = await client.send_command(
             "agent.run",
             {
-                "goal": goal
+                "goal": goal,
+                "workspace_root": workspace_root,
+                "sandbox_mode": config.sandbox.default_mode,
             }
         )
-        
+        run_id = str(created["run_id"])
+        active_root = created.get("workspace_root", workspace_root)
+        active_mode = created.get("sandbox_mode", config.sandbox.default_mode)
+        print(f"[workspace] {active_root}  sandbox={active_mode}")
+        for event in early_events:
+            await on_event(event)
+        early_events.clear()
 
     except IpcError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -121,6 +179,9 @@ async def _run_async(goal: str, config: FloRaConfig) -> int:
         return 1
     
     await finished.wait()
+
+    for task in permission_tasks:
+        task.cancel()
 
     loop_task.cancel()
     try:

@@ -29,11 +29,12 @@ from flora_claude.core.tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from flora_claude.core.llm.base import LLMProvider
     from flora_claude.core.permissions.manager import PermissionManager
+    from flora_claude.core.sandbox.runtime import SandboxExecutor
 
 _profile_loader = AgentProfileLoader()
 
 
-def _now():
+def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 class SpawnAgentParams(BaseModel):
@@ -79,7 +80,7 @@ class SpawnAgentTool(BaseTool):
     }
     params_model = SpawnAgentParams
 
-    # 构造 SpawnAgentTool；depth=0 表示根 agent，最大允许嵌套深度为 2，也就是允许 子Agent 创建孙子 Agent
+    # depth=0 表示根 agent；最多嵌套两层。
     def __init__(
         self,
         provider: LLMProvider,
@@ -90,7 +91,9 @@ class SpawnAgentTool(BaseTool):
         task_registry: BackgroundTaskRegistry,
         runs_dir: Path,
         session_id: str,
-        depth: int = 0
+        depth: int = 0,
+        sandbox_executor: SandboxExecutor | None = None,
+        host_workspace_root: Path | None = None,
     ):
         self._provider = provider
         self._parent_bus = parent_bus
@@ -101,6 +104,8 @@ class SpawnAgentTool(BaseTool):
         self._runs_dir = runs_dir
         self._session_id = session_id
         self._depth = depth
+        self._sandbox_executor = sandbox_executor
+        self._host_workspace_root = host_workspace_root
 
 
     # 派生子 agent，前台时阻塞直到完成并返回结果，后台时立即返回 run_id
@@ -116,7 +121,11 @@ class SpawnAgentTool(BaseTool):
 
         profile: AgentProfile | None = None
         if p.subagent_type:
-            profile = _profile_loader.load(p.subagent_type)
+            profile = _profile_loader.load(
+                p.subagent_type,
+                self._sandbox_executor.workspace_root
+                if self._sandbox_executor else self._host_workspace_root,
+            )
         
         child_run_id = new_run_id()
         child_context = ExecutionContext(
@@ -128,7 +137,7 @@ class SpawnAgentTool(BaseTool):
 
         child_bus = EventBus()
 
-        async def _bridge(event: BaseModel):
+        async def _bridge(event: BaseModel) -> None:
             await self._parent_bus.publish(event)
 
         child_bus.subscribe(_bridge)
@@ -212,7 +221,7 @@ class SpawnAgentTool(BaseTool):
         bus: EventBus,
         run_id: str,
         run_path: Path,
-    ):
+    ) -> None:
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
             await loop.run(context)
@@ -235,7 +244,7 @@ class SpawnAgentTool(BaseTool):
     ) -> ToolRegistry:
         from flora_claude.core.task.manager import TaskManager
 
-        allowed: set[str] = (
+        allowed: set[str] | None = (
             set(profile.allowed_tools) if profile and profile.allowed_tools else None
         )
 
@@ -244,10 +253,10 @@ class SpawnAgentTool(BaseTool):
 
         registry = ToolRegistry()
         _all_tools = [
-            BashTool(),
-            WriteFileTool(),
-            ListDirTool(),
-            ReadFileTool(),
+            BashTool(self._sandbox_executor, workspace_root=self._host_workspace_root),
+            WriteFileTool(self._sandbox_executor, workspace_root=self._host_workspace_root),
+            ListDirTool(self._sandbox_executor, workspace_root=self._host_workspace_root),
+            ReadFileTool(self._sandbox_executor, workspace_root=self._host_workspace_root),
         ]
 
         for t in _all_tools:
@@ -276,6 +285,8 @@ class SpawnAgentTool(BaseTool):
                 runs_dir=self._runs_dir,
                 session_id=self._session_id,
                 depth=self._depth + 1,
+                sandbox_executor=self._sandbox_executor,
+                host_workspace_root=self._host_workspace_root,
             )
 
             if _allowed("spawn_agent"):

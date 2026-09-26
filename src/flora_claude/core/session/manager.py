@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from flora_claude.core.session.model import Session,SessionMode
+from flora_claude.core.session.model import Session, SessionMode, SandboxMode
 from flora_claude.core.session.store import SessionStore
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,7 @@ def _now():
 SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
 SESSION_BUSY = -32012
+INVALID_WORKSPACE = -32013
 
 class SessionManager:
     def __init__(
@@ -36,6 +38,8 @@ class SessionManager:
         runner_factory: Callable[[], AgentRunner],
         bus: EventBus,
         provider: LLMProvider | None = None,
+        default_sandbox_mode: SandboxMode = "off",
+        on_close: Callable[[str], Awaitable[None]] | None = None,
     ):
         self._runner_factory = runner_factory
         self._store = store
@@ -45,10 +49,33 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._provider = provider
         self._skill_loader = SkillLoader()
+        self._default_sandbox_mode = default_sandbox_mode
+        self._on_close = on_close
 
 
     # 创建新 session 并写入 meta.json
-    async def create(self, mode: SessionMode, title: str = "") -> Session:
+    async def create(
+        self,
+        mode: SessionMode,
+        title: str = "",
+        *,
+        workspace_root: str | None = None,
+        sandbox_mode: SandboxMode | None = None,
+    ) -> Session:
+        effective_mode = sandbox_mode if sandbox_mode is not None else self._default_sandbox_mode
+        if effective_mode not in ("off", "read_only", "workspace_write"):
+            raise HandlerError(INVALID_WORKSPACE, "invalid sandbox mode")
+        if effective_mode != "off" and not workspace_root:
+            raise HandlerError(INVALID_WORKSPACE, "workspace_root required for sandboxed session")
+        if effective_mode != "off" and workspace_root is not None and not Path(workspace_root).is_absolute():
+            raise HandlerError(INVALID_WORKSPACE, "workspace_root must be an absolute path")
+        try:
+            root = Path(workspace_root) if workspace_root else Path.cwd()
+            root = root.expanduser().resolve(strict=True)
+            if not root.is_dir():
+                raise HandlerError(INVALID_WORKSPACE, "workspace_root must be an existing directory")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HandlerError(INVALID_WORKSPACE, "workspace_root must be an existing directory") from exc
         sid = f"sess-{uuid.uuid4().hex[:12]}"
         ts = _now()
         session = Session(
@@ -59,6 +86,8 @@ class SessionManager:
             updated_at=ts,
             title=title,
             run_ids=[],
+            workspace_root=str(root),
+            sandbox_mode=effective_mode,
         )
         self._sessions[sid] = session
         self._locks[sid] = asyncio.Lock()
@@ -107,7 +136,10 @@ class SessionManager:
             if content.startswith("/"):
                 parts = content[1:].split(None, 1)
                 skill_name, arguments = parts[0], parts[1] if len(parts) > 1 else ""
-                skill = self._skill_loader.resolve(skill_name)
+                skill = self._skill_loader.resolve(
+                    skill_name, workspace_root=Path(session.workspace_root),
+                    sandbox_mode=session.sandbox_mode,
+                )
                 if skill is not None:
                     goal = self._skill_loader.render_prompt(skill, arguments)
                     system_prompt_override = skill.system_prompt_template
@@ -121,30 +153,28 @@ class SessionManager:
                         )
                     )
 
-            runner = self._runner_factory()
-            await runner.run_and_capture(
-                goal,
-                run_id=run_id,
-                session=session,
-                store=self._store,
-                system_prompt_override=system_prompt_override,
-                tool_whitelist=tool_whitelist,
-            )
-
-            session.updated_at = _now()
-            if session.mode == "one_shot":
-                session.status = "closed"
-                await self._bus.publish(
-                    SessionClosedEvent(session_id=sid, ts=session.updated_at)
+            try:
+                runner = self._runner_factory()
+                await runner.run_and_capture(
+                    goal,
+                    run_id=run_id,
+                    session=session,
+                    store=self._store,
+                    system_prompt_override=system_prompt_override,
+                    tool_whitelist=tool_whitelist,
                 )
-            else:
-                session.status = "waiting_for_input"
-                await self._bus.publish(
-                    SessionWaitingForInputEvent(
-                        session_id=sid, last_run_id=run_id, ts=session.updated_at
+                if session.mode != "one_shot":
+                    session.updated_at = _now()
+                    session.status = "waiting_for_input"
+                    await self._bus.publish(
+                        SessionWaitingForInputEvent(
+                            session_id=sid, last_run_id=run_id, ts=session.updated_at
+                        )
                     )
-                )
-            self._store.write_meta(session)
+                    self._store.write_meta(session)
+            finally:
+                if session.mode == "one_shot":
+                    await self._close_session(session)
             return run_id
 
     # 关闭指定 session 并更新meta.json
@@ -155,14 +185,19 @@ class SessionManager:
             raise HandlerError(SESSION_BUSY, "session busy")
         
         async with lock:
-            session.status = "closed"
-            session.updated_at = _now()
-            self._store.write_meta(session)
-            await self._bus.publish(
-                SessionClosedEvent(
-                    session_id=sid, ts=session.updated_at
-                )
-            )
+            await self._close_session(session)
+
+    async def _close_session(self, session: Session) -> None:
+        if session.status == "closed":
+            return
+        session.status = "closed"
+        session.updated_at = _now()
+        self._store.write_meta(session)
+        try:
+            await self._bus.publish(SessionClosedEvent(session_id=session.id, ts=session.updated_at))
+        finally:
+            if self._on_close is not None:
+                await self._on_close(session.id)
             
     # 手动压缩指定 session 的 thread.jsonl, 将状态摘要持久化写入 thread.jsonl
     async def compact(self, sid: str, focus: str = "") -> Any:

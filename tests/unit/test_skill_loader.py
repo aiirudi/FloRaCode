@@ -35,6 +35,12 @@ def test_unknown_skill_returns_none() -> None:
     assert result is None
 
 
+@pytest.mark.parametrize("name", ["../outside", "../../outside", "review/../outside", "", "a.b"])
+def test_unsafe_skill_name_is_rejected(name: str, tmp_path: Path) -> None:
+    loader = SkillLoader()
+    assert loader.resolve(name, workspace_root=tmp_path, sandbox_mode="read_only") is None
+
+
 # 功能：render_prompt 应将 $ARGUMENTS 替换为传入的参数字符串
 # 设计：构造含 $ARGUMENTS 的 skill，验证 render_prompt 结果不含 "$ARGUMENTS" 且含参数值
 def test_arguments_substituted() -> None:
@@ -104,3 +110,23 @@ def test_project_overrides_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert skill is not None
     assert skill.description == "local override"
     assert "local system prompt" in skill.system_prompt_template
+
+
+def test_sandbox_project_skill_does_not_follow_link_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    local_skills = workspace / ".flora" / "skills"
+    local_skills.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("---\nname: review\ndescription: outside\n---\noutside", encoding="utf-8")
+    try:
+        (local_skills / "review.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("creating file symlinks is unavailable")
+
+    loader = SkillLoader()
+    skill = loader.resolve("review", workspace_root=workspace, sandbox_mode="read_only")
+    assert skill is not None
+    assert skill.description != "outside"
+    assert all(skill.description != "outside" for skill in loader.list_all_skills(
+        workspace, sandbox_mode="read_only"
+    ))

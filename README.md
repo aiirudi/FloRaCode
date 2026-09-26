@@ -32,5 +32,6 @@ uv run flora --version       # 应输出 0.0.1
 
 ## 文档
 
+- **[沙箱使用说明](./docs/sandbox.md)** — Docker 沙箱模式、配置和运行边界
 - **[RUNBOOK.md](./RUNBOOK.md)** — 完整操作参考：配置、开发命令、故障排查
 - **[WIRE_PROTOCOL.md](./WIRE_PROTOCOL.md)** — IPC 协议定义（由代码生成，勿手动编辑）

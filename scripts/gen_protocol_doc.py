@@ -96,12 +96,20 @@ def generate() -> str:
         "jsonrpc": "2.0",
         "id": "u-2",
         "method": "agent.run",
-        "params": {"goal": "总结 README.md 的主要章节"},
+        "params": {
+            "goal": "总结 README.md 的主要章节",
+            "workspace_root": "/home/user/project",
+            "sandbox_mode": "read_only",
+        },
     }
     agent_run_resp_example = {
         "jsonrpc": "2.0",
         "id": "u-2",
-        "result": {"run_id": run_id},
+        "result": {
+            "run_id": run_id,
+            "workspace_root": "/home/user/project",
+            "sandbox_mode": "read_only",
+        },
     }
     subscribe_req_example = {
         "jsonrpc": "2.0",
@@ -123,12 +131,20 @@ def generate() -> str:
         "jsonrpc": "2.0",
         "id": "u-4",
         "method": "session.create",
-        "params": {"mode": "chat", "title": ""},
+        "params": {
+            "mode": "chat", "title": "",
+            "workspace_root": "/home/user/project",
+            "sandbox_mode": "workspace_write",
+        },
     }
     session_create_resp_example = {
         "jsonrpc": "2.0",
         "id": "u-4",
-        "result": {"session_id": session_id, "status": "active"},
+        "result": {
+            "session_id": session_id, "status": "active",
+            "workspace_root": "/home/user/project",
+            "sandbox_mode": "workspace_write",
+        },
     }
     session_send_req_example = {
         "jsonrpc": "2.0",
